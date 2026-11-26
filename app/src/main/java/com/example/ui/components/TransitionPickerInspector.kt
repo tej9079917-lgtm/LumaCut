@@ -574,6 +574,74 @@ private fun TransitionDiagramCanvas(
                     cornerRadius = cr
                 )
             }
+            TransitionType.DIRECTIONAL_BLUR -> {
+                for (i in 0..3) {
+                    val xOff = w * (0.08f + i * 0.14f)
+                    drawRoundRect(
+                        color = accent.copy(alpha = 0.22f + i * 0.18f),
+                        topLeft = Offset(xOff, h * 0.16f),
+                        size = Size(w * 0.42f, h * 0.68f),
+                        cornerRadius = cr
+                    )
+                }
+            }
+            TransitionType.WHIP_PAN -> {
+                drawRoundRect(
+                    brush = Brush.horizontalGradient(
+                        listOf(secondary.copy(alpha = 0.2f), accent.copy(alpha = 0.9f), secondary.copy(alpha = 0.2f))
+                    ),
+                    topLeft = Offset(0f, h * 0.22f),
+                    size = Size(w, h * 0.56f),
+                    cornerRadius = cr
+                )
+                drawLine(
+                    color = ChalkWhite,
+                    start = Offset(w * 0.12f, h * 0.5f),
+                    end = Offset(w * 0.88f, h * 0.5f),
+                    strokeWidth = 2.dp.toPx(),
+                    cap = StrokeCap.Round
+                )
+            }
+            TransitionType.GLITCH -> {
+                drawRoundRect(
+                    color = Color(0xCCFF2D55),
+                    topLeft = Offset(w * 0.08f, h * 0.14f),
+                    size = Size(w * 0.72f, h * 0.28f),
+                    cornerRadius = cr
+                )
+                drawRoundRect(
+                    color = Color(0xCC00E5FF),
+                    topLeft = Offset(w * 0.20f, h * 0.42f),
+                    size = Size(w * 0.72f, h * 0.24f),
+                    cornerRadius = cr
+                )
+                drawRoundRect(
+                    color = accent.copy(alpha = 0.85f),
+                    topLeft = Offset(w * 0.12f, h * 0.66f),
+                    size = Size(w * 0.64f, h * 0.20f),
+                    cornerRadius = cr
+                )
+            }
+            TransitionType.FILM_BURN -> {
+                drawRoundRect(
+                    brush = Brush.horizontalGradient(
+                        listOf(Color(0xCC7C2D12), Color(0xFFF97316), Color(0xFFFDE047), Color(0xCC7C2D12))
+                    ),
+                    topLeft = Offset(0f, h * 0.12f),
+                    size = Size(w, h * 0.76f),
+                    cornerRadius = cr
+                )
+            }
+            TransitionType.LIGHT_LEAK -> {
+                drawRoundRect(
+                    brush = Brush.linearGradient(
+                        listOf(Color(0x99F59E0B), Color(0xDDFF6B35), Color(0x44A855F7))
+                    ),
+                    topLeft = Offset(0f, h * 0.10f),
+                    size = Size(w, h * 0.80f),
+                    cornerRadius = cr
+                )
+            }
         }
     }
 }

@@ -25,8 +25,10 @@ import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Animation
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.MovieFilter
@@ -34,6 +36,7 @@ import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Straighten
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VideoLibrary
@@ -308,6 +311,9 @@ private fun CommandCategory.icon(): ImageVector = when (this) {
     CommandCategory.CANVAS -> Icons.Default.AspectRatio
     CommandCategory.MOTION -> Icons.Default.Animation
     CommandCategory.SPEED -> Icons.Default.Speed
+    CommandCategory.CUTOUT -> Icons.Default.AutoFixHigh
+    CommandCategory.MASK -> Icons.Default.CropFree
+    CommandCategory.CAPTIONS -> Icons.Default.Subtitles
 }
 
 private fun CommandCategory.accentColor(): Color = when (this) {
@@ -323,4 +329,7 @@ private fun CommandCategory.accentColor(): Color = when (this) {
     CommandCategory.CANVAS -> SilverMuted
     CommandCategory.MOTION -> TrackOverlayEmerald
     CommandCategory.SPEED -> TrackAudioRose
+    CommandCategory.CUTOUT -> TrackOverlayEmerald
+    CommandCategory.MASK -> TrackVideoBlue
+    CommandCategory.CAPTIONS -> CinemaAmber
 }
