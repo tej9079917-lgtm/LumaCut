@@ -1,0 +1,6 @@
+{
+  "name": "LumaCut",
+  "description": "Offline multilayer Android video editing studio with overlays, cutting, media and custom font imports, transitions, filters, color grading, audio mixing, and MP4 gallery export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

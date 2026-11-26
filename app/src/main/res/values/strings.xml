@@ -1,0 +1,30 @@
+<resources>
+    <string name="app_name">LumaCut</string>
+    <string name="studio_tagline">Multilayer Cinema Studio</string>
+    <string name="new_project">New Project</string>
+    <string name="recent_projects">Projects</string>
+    <string name="font_library">Fonts</string>
+    <string name="export_video">Export</string>
+    <string name="empty_projects_title">Your Editing Bay Is Ready</string>
+    <string name="empty_projects_subtitle">Start a multilayer timeline with videos, photos, audio tracks, custom fonts, transitions, and cinema grading.</string>
+    <string name="import_video">Video</string>
+    <string name="import_photo">Photo</string>
+    <string name="import_audio">Audio</string>
+    <string name="import_font">Import Font</string>
+    <string name="add_text">Text</string>
+    <string name="add_overlay">Overlay</string>
+    <string name="tool_split">Split</string>
+    <string name="tool_filters">Filters</string>
+    <string name="tool_adjust">Adjust</string>
+    <string name="tool_audio">Audio</string>
+    <string name="tool_canvas">Canvas</string>
+    <string name="tool_transitions">Transition</string>
+    <string name="tool_delete">Delete</string>
+    <string name="tool_duplicate">Duplicate</string>
+    <string name="cd_back">Navigate back</string>
+    <string name="cd_undo">Undo edit</string>
+    <string name="cd_redo">Redo edit</string>
+    <string name="cd_play_pause">Play or pause preview</string>
+    <string name="cd_export">Export video to gallery</string>
+    <string name="cd_studio_hero">LumaCut dark cinema studio backdrop</string>
+</resources>
