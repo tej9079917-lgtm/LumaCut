@@ -1,7 +1,6 @@
 package com.example.ai
 
 import android.graphics.Bitmap
-import android.util.Log
 import com.example.model.CaptionAnimationPreset
 import com.example.model.CaptionClip
 import com.example.model.ColorAdjustments
@@ -12,233 +11,215 @@ import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
-private const val TAG = "GeminiColoristService"
-private const val MODEL_ID = "gemini-3.8-flash"
-
-data class AiColoristResult(
+data class AiColorGradeResult(
     val adjustments: ColorAdjustments,
     val coloristNote: String
 )
 
 /**
- * Cloud AI services powered by Firebase AI Logic (`gemini-3.8-flash`):
- * 1. Gemini AI Colorist: analyzes an active video/photo frame + natural language look prompt
- *    and returns exact DaVinci Lift/Gamma/Gain, primary sliders, film grain & halation values.
- * 2. Gemini Smart Auto-Captions: converts a spoken/pasted script into timed Reels/Shorts caption
- *    blocks with punchy 3–6 word segments for Track T1.
+ * Firebase AI Logic service powering LumaCut's Gemini AI Colorist and AI Smart Script Captions.
+ * Uses `gemini-3.8-flash` with strict JSON Schema output and App Check attestation.
  */
 object GeminiColoristService {
 
-    private val coloristSchema: Schema by lazy {
-        Schema.obj(
-            mapOf(
-                "brightness" to Schema.double("Exposure/brightness offset between -0.35 and 0.35"),
-                "contrast" to Schema.double("Contrast multiplier between 0.65 and 1.65 (1.0 is neutral)"),
-                "saturation" to Schema.double("Saturation multiplier between 0.0 and 1.85 (1.0 is neutral)"),
-                "temperature" to Schema.double("Color temperature between -1.0 (cool blue) and 1.0 (warm amber)"),
-                "tint" to Schema.double("Green-magenta tint between -0.8 (green) and 0.8 (magenta)"),
-                "highlights" to Schema.double("Highlights recovery/boost between -0.8 and 0.8"),
-                "shadows" to Schema.double("Shadows lift/crush between -0.8 and 0.8"),
-                "liftX" to Schema.double("Shadow color wheel X (-0.75 cool cyan to 0.75 warm red)"),
-                "liftY" to Schema.double("Shadow color wheel Y (-0.75 green to 0.75 magenta)"),
-                "liftLuma" to Schema.double("Shadow luminance lift between -0.25 and 0.25"),
-                "gammaX" to Schema.double("Midtone color wheel X (-0.75 cool to 0.75 warm)"),
-                "gammaY" to Schema.double("Midtone color wheel Y (-0.75 green to 0.75 magenta)"),
-                "gammaLuma" to Schema.double("Midtone luminance offset between -0.25 and 0.25"),
-                "gainX" to Schema.double("Highlight color wheel X (-0.75 cool to 0.75 warm)"),
-                "gainY" to Schema.double("Highlight color wheel Y (-0.75 green to 0.75 magenta)"),
-                "gainLuma" to Schema.double("Highlight luminance offset between -0.25 and 0.25"),
-                "filmGrain" to Schema.double("Analog film grain strength between 0.0 and 0.65"),
-                "halation" to Schema.double("Warm cinema highlight halation between 0.0 and 0.70"),
-                "coloristNote" to Schema.string("Short 1-sentence colorist explanation of the look applied")
-            )
-        )
-    }
+    private const val MODEL_NAME = "gemini-3.8-flash"
+    private const val REQUEST_TIMEOUT_MS = 60_000L
 
-    private val captionSchema: Schema by lazy {
-        Schema.obj(
-            mapOf(
-                "blocks" to Schema.array(
-                    Schema.obj(
-                        mapOf(
-                            "text" to Schema.string("Short punchy subtitle phrase (2 to 6 words)"),
-                            "startMs" to Schema.integer("Start timestamp in milliseconds"),
-                            "endMs" to Schema.integer("End timestamp in milliseconds")
-                        )
+    private val colorGradeSchema = Schema.obj(
+        properties = mapOf(
+            "brightness" to Schema.float(description = "Exposure / brightness offset from -0.35 to 0.35"),
+            "contrast" to Schema.float(description = "Contrast multiplier from 0.65 to 1.65 (1.0 neutral)"),
+            "saturation" to Schema.float(description = "Saturation multiplier from 0.0 to 1.85 (1.0 neutral)"),
+            "temperature" to Schema.float(description = "Color temperature from -0.85 (cool blue) to 0.85 (warm amber)"),
+            "tint" to Schema.float(description = "Green-Magenta tint from -0.6 to 0.6"),
+            "highlights" to Schema.float(description = "Highlights recovery/boost from -0.8 to 0.8"),
+            "shadows" to Schema.float(description = "Shadows lift/crush from -0.8 to 0.8"),
+            "liftX" to Schema.float(description = "Shadow color wheel X from -0.75 (cyan/teal) to 0.75 (amber/red)"),
+            "liftY" to Schema.float(description = "Shadow color wheel Y from -0.75 (green) to 0.75 (magenta)"),
+            "liftLuma" to Schema.float(description = "Shadow master lift from -0.25 to 0.25"),
+            "gammaX" to Schema.float(description = "Midtone color wheel X from -0.75 to 0.75"),
+            "gammaY" to Schema.float(description = "Midtone color wheel Y from -0.75 to 0.75"),
+            "gammaLuma" to Schema.float(description = "Midtone master gamma from -0.25 to 0.25"),
+            "gainX" to Schema.float(description = "Highlight color wheel X from -0.75 to 0.75"),
+            "gainY" to Schema.float(description = "Highlight color wheel Y from -0.75 to 0.75"),
+            "gainLuma" to Schema.float(description = "Highlight master gain from -0.25 to 0.25"),
+            "filmGrain" to Schema.float(description = "Analog film grain amount from 0.0 to 0.65"),
+            "halation" to Schema.float(description = "Warm highlight film halation from 0.0 to 0.65"),
+            "coloristNote" to Schema.string(description = "One concise sentence explaining the cinematic look created")
+        )
+    )
+
+    private val timedCaptionsSchema = Schema.obj(
+        properties = mapOf(
+            "blocks" to Schema.array(
+                items = Schema.obj(
+                    properties = mapOf(
+                        "text" to Schema.string(description = "Short punchy subtitle phrase (3 to 7 words max)"),
+                        "durationMs" to Schema.integer(description = "Estimated speaking duration in milliseconds between 900 and 4000")
                     )
-                )
+                ),
+                description = "Ordered list of short kinetic subtitle blocks"
             )
         )
-    }
+    )
 
     private val coloristModel by lazy {
         Firebase.ai.generativeModel(
-            modelName = MODEL_ID,
+            modelName = MODEL_NAME,
             generationConfig = generationConfig {
-                temperature = 0.45f
                 responseMimeType = "application/json"
-                responseSchema = coloristSchema
+                responseSchema = colorGradeSchema
+                temperature = 0.55f
             }
         )
     }
 
     private val captionModel by lazy {
         Firebase.ai.generativeModel(
-            modelName = MODEL_ID,
+            modelName = MODEL_NAME,
             generationConfig = generationConfig {
-                temperature = 0.2f
                 responseMimeType = "application/json"
-                responseSchema = captionSchema
+                responseSchema = timedCaptionsSchema
+                temperature = 0.3f
             }
         )
     }
 
-    suspend fun analyzeAndGrade(
+    suspend fun generateColorGrade(
         frameBitmap: Bitmap?,
-        lookPrompt: String,
-        currentGrade: ColorAdjustments
-    ): Result<AiColoristResult> {
-        val cleanPrompt = lookPrompt.trim()
-        if (cleanPrompt.isEmpty()) {
-            return Result.failure(IllegalArgumentException("Enter a color look prompt first."))
+        prompt: String,
+        currentAdjustments: ColorAdjustments
+    ): Result<AiColorGradeResult> {
+        val trimmed = prompt.trim()
+        if (trimmed.isEmpty()) {
+            return Result.failure(IllegalArgumentException("Enter a cinematic look prompt first."))
         }
-        return withContext(Dispatchers.IO) {
-            try {
-                val scaledFrame = frameBitmap?.let { downscaleForAi(it, 512) }
-                val instruction = buildString {
-                    appendLine("You are a senior Hollywood DaVinci Resolve DI colorist.")
-                    appendLine("Translate the user's grading direction into precise numeric Lift/Gamma/Gain color wheel coordinates and primary grading sliders.")
-                    appendLine("Keep skin tones natural unless the prompt asks for stylized neon/cyberpunk/monochrome.")
-                    appendLine("User request: \"$cleanPrompt\"")
-                }
-                val response = withTimeout(60_000L) {
-                    val promptContent = content {
-                        if (scaledFrame != null) {
-                            image(scaledFrame)
-                        }
-                        text(instruction)
+
+        return try {
+            val scaledFrame = frameBitmap?.let { scaleForVision(it, maxDim = 640) }
+            val instruction = buildString {
+                append("You are a senior DaVinci Resolve feature-film colorist. ")
+                append("Translate the creator's requested look into exact color grading wheel and primary coordinates. ")
+                append("Keep skin tones natural unless a stylized look is explicitly requested. ")
+                append("Requested look: \"$trimmed\".")
+            }
+
+            val response = withTimeout(REQUEST_TIMEOUT_MS) {
+                val inputContent = content {
+                    if (scaledFrame != null) {
+                        image(scaledFrame)
                     }
-                    coloristModel.generateContent(promptContent)
+                    text(instruction)
                 }
-                if (scaledFrame != null && scaledFrame !== frameBitmap && !scaledFrame.isRecycled) {
-                    scaledFrame.recycle()
-                }
-                val rawJson = response.text?.trim()
-                    ?: return@withContext Result.failure(IllegalStateException("Empty response from AI Colorist."))
-
-                val json = JSONObject(rawJson)
-                val updated = currentGrade.copy(
-                    brightness = json.optDouble("brightness", 0.0).toFloat().coerceIn(-0.45f, 0.45f),
-                    contrast = json.optDouble("contrast", 1.0).toFloat().coerceIn(0.55f, 1.75f),
-                    saturation = json.optDouble("saturation", 1.0).toFloat().coerceIn(0f, 1.95f),
-                    temperature = json.optDouble("temperature", 0.0).toFloat().coerceIn(-1f, 1f),
-                    tint = json.optDouble("tint", 0.0).toFloat().coerceIn(-1f, 1f),
-                    highlights = json.optDouble("highlights", 0.0).toFloat().coerceIn(-1f, 1f),
-                    shadows = json.optDouble("shadows", 0.0).toFloat().coerceIn(-1f, 1f),
-                    lift = ColorWheelOffset(
-                        x = json.optDouble("liftX", 0.0).toFloat().coerceIn(-0.85f, 0.85f),
-                        y = json.optDouble("liftY", 0.0).toFloat().coerceIn(-0.85f, 0.85f),
-                        luma = json.optDouble("liftLuma", 0.0).toFloat().coerceIn(-0.35f, 0.35f)
-                    ),
-                    gamma = ColorWheelOffset(
-                        x = json.optDouble("gammaX", 0.0).toFloat().coerceIn(-0.85f, 0.85f),
-                        y = json.optDouble("gammaY", 0.0).toFloat().coerceIn(-0.85f, 0.85f),
-                        luma = json.optDouble("gammaLuma", 0.0).toFloat().coerceIn(-0.35f, 0.35f)
-                    ),
-                    gain = ColorWheelOffset(
-                        x = json.optDouble("gainX", 0.0).toFloat().coerceIn(-0.85f, 0.85f),
-                        y = json.optDouble("gainY", 0.0).toFloat().coerceIn(-0.85f, 0.85f),
-                        luma = json.optDouble("gainLuma", 0.0).toFloat().coerceIn(-0.35f, 0.35f)
-                    ),
-                    filmGrain = json.optDouble("filmGrain", 0.0).toFloat().coerceIn(0f, 0.85f),
-                    halation = json.optDouble("halation", 0.0).toFloat().coerceIn(0f, 0.85f)
-                )
-                val note = json.optString("coloristNote", "Applied AI grade for \"$cleanPrompt\".")
-                Result.success(AiColoristResult(updated, note))
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "AI Colorist request failed", e)
-                Result.failure(e)
+                coloristModel.generateContent(inputContent)
             }
+
+            val rawJson = response.text?.trim()
+                ?: return Result.failure(IllegalStateException("Gemini returned an empty grading response."))
+
+            val json = JSONObject(rawJson)
+            val newAdjustments = currentAdjustments.copy(
+                brightness = json.optDouble("brightness", 0.0).toFloat().coerceIn(-0.45f, 0.45f),
+                contrast = json.optDouble("contrast", 1.0).toFloat().coerceIn(0.55f, 1.75f),
+                saturation = json.optDouble("saturation", 1.0).toFloat().coerceIn(0f, 1.95f),
+                temperature = json.optDouble("temperature", 0.0).toFloat().coerceIn(-0.95f, 0.95f),
+                tint = json.optDouble("tint", 0.0).toFloat().coerceIn(-0.85f, 0.85f),
+                highlights = json.optDouble("highlights", 0.0).toFloat().coerceIn(-0.95f, 0.95f),
+                shadows = json.optDouble("shadows", 0.0).toFloat().coerceIn(-0.95f, 0.95f),
+                lift = ColorWheelOffset(
+                    x = json.optDouble("liftX", 0.0).toFloat().coerceIn(-0.9f, 0.9f),
+                    y = json.optDouble("liftY", 0.0).toFloat().coerceIn(-0.9f, 0.9f),
+                    luma = json.optDouble("liftLuma", 0.0).toFloat().coerceIn(-0.35f, 0.35f)
+                ),
+                gamma = ColorWheelOffset(
+                    x = json.optDouble("gammaX", 0.0).toFloat().coerceIn(-0.9f, 0.9f),
+                    y = json.optDouble("gammaY", 0.0).toFloat().coerceIn(-0.9f, 0.9f),
+                    luma = json.optDouble("gammaLuma", 0.0).toFloat().coerceIn(-0.35f, 0.35f)
+                ),
+                gain = ColorWheelOffset(
+                    x = json.optDouble("gainX", 0.0).toFloat().coerceIn(-0.9f, 0.9f),
+                    y = json.optDouble("gainY", 0.0).toFloat().coerceIn(-0.9f, 0.9f),
+                    luma = json.optDouble("gainLuma", 0.0).toFloat().coerceIn(-0.35f, 0.35f)
+                ),
+                filmGrain = json.optDouble("filmGrain", 0.0).toFloat().coerceIn(0f, 0.85f),
+                halation = json.optDouble("halation", 0.0).toFloat().coerceIn(0f, 0.85f)
+            )
+            val note = json.optString("coloristNote", "Applied custom AI color grade.")
+            Result.success(AiColorGradeResult(newAdjustments, note))
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 
-    suspend fun generateSmartCaptionsFromScript(
+    suspend fun generateTimedCaptionsFromScript(
         script: String,
-        startTimeMs: Long,
-        totalDurationMs: Long
+        startAtMs: Long,
+        targetDurationMs: Long
     ): Result<List<CaptionClip>> {
-        val clean = script.trim()
-        if (clean.isEmpty()) {
-            return Result.failure(IllegalArgumentException("Enter or paste dialogue text first."))
+        val cleaned = script.trim()
+        if (cleaned.isEmpty()) {
+            return Result.failure(IllegalArgumentException("Enter or paste a voiceover script first."))
         }
-        val windowDuration = totalDurationMs.coerceAtLeast(3000L)
-        return withContext(Dispatchers.IO) {
-            try {
-                val prompt = buildString {
-                    appendLine("Split the following video dialogue into kinetic Reels/Shorts subtitle captions.")
-                    appendLine("Each caption block should be 2 to 6 punchy words with realistic spoken pacing.")
-                    appendLine("Start at ${startTimeMs}ms and fit within ${startTimeMs + windowDuration}ms without overlapping.")
-                    appendLine("Dialogue:")
-                    appendLine(clean)
-                }
-                val response = withTimeout(60_000L) {
-                    captionModel.generateContent(prompt)
-                }
-                val rawJson = response.text?.trim()
-                    ?: return@withContext Result.failure(IllegalStateException("Empty response from AI Auto-Captions."))
-                val root = JSONObject(rawJson)
-                val arr = root.optJSONArray("blocks")
-                    ?: return@withContext Result.failure(IllegalStateException("No caption blocks returned."))
-                val captions = mutableListOf<CaptionClip>()
-                for (i in 0 until arr.length()) {
-                    val obj = arr.optJSONObject(i) ?: continue
-                    val txt = obj.optString("text", "").trim()
-                    if (txt.isEmpty()) continue
-                    val st = obj.optLong("startMs", startTimeMs + i * 1600L).coerceAtLeast(0L)
-                    val en = obj.optLong("endMs", st + 1500L).coerceAtLeast(st + 350L)
-                    captions.add(
-                        CaptionClip(
-                            text = txt,
-                            startTimeMs = st,
-                            endTimeMs = en,
-                            animationPreset = CaptionAnimationPreset.ACTIVE_WORD_HIGHLIGHT
-                        )
-                    )
-                }
-                if (captions.isEmpty()) {
-                    return@withContext Result.failure(IllegalStateException("Could not extract any captions."))
-                }
-                Result.success(captions.sortedBy { it.startTimeMs })
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "AI Smart Captions request failed", e)
-                Result.failure(e)
+
+        return try {
+            val prompt = buildString {
+                append("Split the following video voiceover script into punchy short-form Reels/Shorts subtitle blocks ")
+                append("of 3 to 6 words each with realistic speaking durations in milliseconds. ")
+                append("Target total duration is roughly ${targetDurationMs.coerceAtLeast(3000L)} ms.\n\n")
+                append("Script:\n$cleaned")
             }
+
+            val response = withTimeout(REQUEST_TIMEOUT_MS) {
+                captionModel.generateContent(prompt)
+            }
+            val rawJson = response.text?.trim()
+                ?: return Result.failure(IllegalStateException("Gemini returned an empty captions response."))
+
+            val root = JSONObject(rawJson)
+            val arr = root.optJSONArray("blocks")
+                ?: return Result.failure(IllegalStateException("No caption blocks returned."))
+
+            var cursor = startAtMs.coerceAtLeast(0L)
+            val clips = mutableListOf<CaptionClip>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val text = obj.optString("text", "").trim()
+                if (text.isEmpty()) continue
+                val dur = obj.optLong("durationMs", 1800L).coerceIn(700L, 6000L)
+                clips.add(
+                    CaptionClip(
+                        text = text,
+                        startTimeMs = cursor,
+                        endTimeMs = cursor + dur,
+                        animationPreset = CaptionAnimationPreset.ACTIVE_WORD_HIGHLIGHT
+                    )
+                )
+                cursor += dur + 80L
+            }
+            if (clips.isEmpty()) {
+                Result.failure(IllegalStateException("Could not extract subtitle blocks from script."))
+            } else {
+                Result.success(clips)
+            }
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 
-    private fun downscaleForAi(src: Bitmap, maxEdge: Int): Bitmap {
-        val w = src.width
-        val h = src.height
-        if (w <= maxEdge && h <= maxEdge) return src
-        val ratio = w.toFloat() / h.coerceAtLeast(1).toFloat()
-        val dstW: Int
-        val dstH: Int
-        if (ratio >= 1f) {
-            dstW = maxEdge
-            dstH = (maxEdge / ratio).toInt().coerceAtLeast(32)
-        } else {
-            dstH = maxEdge
-            dstW = (maxEdge * ratio).toInt().coerceAtLeast(32)
-        }
-        return Bitmap.createScaledBitmap(src, dstW, dstH, true)
+    private fun scaleForVision(src: Bitmap, maxDim: Int): Bitmap {
+        val w = src.width.coerceAtLeast(1)
+        val h = src.height.coerceAtLeast(1)
+        if (w <= maxDim && h <= maxDim) return src
+        val ratio = minOf(maxDim.toFloat() / w, maxDim.toFloat() / h)
+        val outW = (w * ratio).toInt().coerceAtLeast(64)
+        val outH = (h * ratio).toInt().coerceAtLeast(64)
+        return Bitmap.createScaledBitmap(src, outW, outH, true)
     }
 }

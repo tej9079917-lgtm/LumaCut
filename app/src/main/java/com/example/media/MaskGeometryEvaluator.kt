@@ -3,6 +3,8 @@ package com.example.media
 import android.graphics.Bitmap
 import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PorterDuff
@@ -24,14 +26,17 @@ data class EvaluatedMaskGeometry(
 )
 
 /**
- * Evaluates Fusion-style Shape & Bezier Pen Masks (with keyframe interpolation, expansion,
- * invert, feathering, and opacity) for both live PreviewStage and Media3 Export.
+ * Evaluates Fusion-style Shape & Bezier Pen Masks (with keyframe animation, expansion,
+ * feathering, opacity, and inversion) for both live Compose preview and Media3 export.
  */
 object MaskGeometryEvaluator {
 
-    fun evaluateGeometry(mask: MaskSettings, localTimeMs: Long): EvaluatedMaskGeometry {
-        val kfs = mask.keyframes.sortedBy { it.timeOffsetMs }
-        if (kfs.isEmpty()) {
+    /**
+     * Pure JVM-testable interpolation of animated [MaskSettings.keyframes] at clip-local [timeOffsetMs].
+     */
+    fun evaluateGeometry(mask: MaskSettings, timeOffsetMs: Long): EvaluatedMaskGeometry {
+        val sorted = mask.keyframes.sortedBy { it.timeOffsetMs }
+        if (sorted.isEmpty()) {
             return EvaluatedMaskGeometry(
                 centerX = mask.centerX,
                 centerY = mask.centerY,
@@ -40,8 +45,8 @@ object MaskGeometryEvaluator {
                 rotationDegrees = mask.rotationDegrees
             )
         }
-        if (localTimeMs <= kfs.first().timeOffsetMs) {
-            val first = kfs.first()
+        val first = sorted.first()
+        if (timeOffsetMs <= first.timeOffsetMs) {
             return EvaluatedMaskGeometry(
                 centerX = first.centerX,
                 centerY = first.centerY,
@@ -50,8 +55,8 @@ object MaskGeometryEvaluator {
                 rotationDegrees = first.rotationDegrees
             )
         }
-        if (localTimeMs >= kfs.last().timeOffsetMs) {
-            val last = kfs.last()
+        val last = sorted.last()
+        if (timeOffsetMs >= last.timeOffsetMs) {
             return EvaluatedMaskGeometry(
                 centerX = last.centerX,
                 centerY = last.centerY,
@@ -60,120 +65,119 @@ object MaskGeometryEvaluator {
                 rotationDegrees = last.rotationDegrees
             )
         }
-        for (i in 0 until kfs.lastIndex) {
-            val a = kfs[i]
-            val b = kfs[i + 1]
-            if (localTimeMs in a.timeOffsetMs..b.timeOffsetMs) {
-                val span = (b.timeOffsetMs - a.timeOffsetMs).coerceAtLeast(1L).toFloat()
-                val rawT = ((localTimeMs - a.timeOffsetMs) / span).coerceIn(0f, 1f)
-                // Smooth ease-in-out
-                val t = rawT * rawT * (3f - 2f * rawT)
-                val w = lerp(a.width, b.width, t) + mask.expansion * 2f
-                val h = lerp(a.height, b.height, t) + mask.expansion * 2f
-                return EvaluatedMaskGeometry(
-                    centerX = lerp(a.centerX, b.centerX, t),
-                    centerY = lerp(a.centerY, b.centerY, t),
-                    width = w.coerceIn(0.04f, 1.8f),
-                    height = h.coerceIn(0.04f, 1.8f),
-                    rotationDegrees = lerp(a.rotationDegrees, b.rotationDegrees, t)
-                )
-            }
-        }
+        val nextIdx = sorted.indexOfFirst { it.timeOffsetMs >= timeOffsetMs }.coerceAtLeast(1)
+        val a = sorted[nextIdx - 1]
+        val b = sorted[nextIdx]
+        val span = (b.timeOffsetMs - a.timeOffsetMs).coerceAtLeast(1L).toFloat()
+        val t = ((timeOffsetMs - a.timeOffsetMs).toFloat() / span).coerceIn(0f, 1f)
+        // Smoothstep ease
+        val s = t * t * (3f - 2f * t)
         return EvaluatedMaskGeometry(
-            centerX = mask.centerX,
-            centerY = mask.centerY,
-            width = (mask.width + mask.expansion * 2f).coerceIn(0.04f, 1.8f),
-            height = (mask.height + mask.expansion * 2f).coerceIn(0.04f, 1.8f),
-            rotationDegrees = mask.rotationDegrees
+            centerX = a.centerX + (b.centerX - a.centerX) * s,
+            centerY = a.centerY + (b.centerY - a.centerY) * s,
+            width = ((a.width + (b.width - a.width) * s) + mask.expansion * 2f).coerceIn(0.04f, 1.8f),
+            height = ((a.height + (b.height - a.height) * s) + mask.expansion * 2f).coerceIn(0.04f, 1.8f),
+            rotationDegrees = a.rotationDegrees + (b.rotationDegrees - a.rotationDegrees) * s
         )
     }
 
     /**
-     * Pure geometric point-in-mask check (normalized 0..1 coordinates), used by unit tests
-     * and hit-testing.
+     * Pure JVM-testable point-in-mask alpha test `[0..1]` for unit tests and hit detection.
      */
     fun isPointInsideMask(
         normX: Float,
         normY: Float,
         mask: MaskSettings,
-        localTimeMs: Long = 0L
+        timeOffsetMs: Long = 0L
     ): Boolean {
         if (!mask.isActive) return true
-        val geom = evaluateGeometry(mask, localTimeMs)
-        val insideRaw = when (mask.shape) {
+        val geom = evaluateGeometry(mask, timeOffsetMs)
+        val dx = normX - geom.centerX
+        val dy = normY - geom.centerY
+        val rad = (-geom.rotationDegrees * PI / 180.0)
+        val cosR = cos(rad).toFloat()
+        val sinR = sin(rad).toFloat()
+        val rx = dx * cosR - dy * sinR
+        val ry = dx * sinR + dy * cosR
+
+        val inside = when (mask.shape) {
             MaskShape.NONE -> true
             MaskShape.RECTANGLE -> {
-                val (lx, ly) = rotatePointAround(normX, normY, geom.centerX, geom.centerY, -geom.rotationDegrees)
                 val halfW = geom.width / 2f
                 val halfH = geom.height / 2f
-                lx in (geom.centerX - halfW)..(geom.centerX + halfW) &&
-                    ly in (geom.centerY - halfH)..(geom.centerY + halfH)
+                rx in -halfW..halfW && ry in -halfH..halfH
             }
             MaskShape.CIRCLE -> {
-                val (lx, ly) = rotatePointAround(normX, normY, geom.centerX, geom.centerY, -geom.rotationDegrees)
-                val rx = (geom.width / 2f).coerceAtLeast(0.01f)
-                val ry = (geom.height / 2f).coerceAtLeast(0.01f)
-                val dx = (lx - geom.centerX) / rx
-                val dy = (ly - geom.centerY) / ry
-                dx * dx + dy * dy <= 1f
+                val halfW = (geom.width / 2f).coerceAtLeast(0.01f)
+                val halfH = (geom.height / 2f).coerceAtLeast(0.01f)
+                val nx = rx / halfW
+                val ny = ry / halfH
+                (nx * nx + ny * ny) <= 1f
             }
-            MaskShape.LINEAR_SPLIT -> {
-                val (_, ly) = rotatePointAround(normX, normY, geom.centerX, geom.centerY, -geom.rotationDegrees)
-                ly <= geom.centerY
-            }
+            MaskShape.LINEAR_SPLIT -> rx <= 0f
             MaskShape.FREEHAND_PEN -> pointInPolygon(normX, normY, mask.penPoints)
         }
-        return if (mask.invert) !insideRaw else insideRaw
+        return if (mask.invert) !inside else inside
     }
 
-    fun buildAndroidMaskPath(
+    /**
+     * Builds an Android [Path] for [mask] in pixel coordinates `(widthPx x heightPx)`.
+     */
+    fun buildAndroidPath(
         mask: MaskSettings,
         widthPx: Float,
         heightPx: Float,
-        localTimeMs: Long = 0L
+        timeOffsetMs: Long = 0L
     ): Path {
         val path = Path()
-        val geom = evaluateGeometry(mask, localTimeMs)
+        val geom = evaluateGeometry(mask, timeOffsetMs)
         val cx = geom.centerX * widthPx
         val cy = geom.centerY * heightPx
-        val mw = geom.width * widthPx
-        val mh = geom.height * heightPx
+        val halfW = (geom.width * widthPx) / 2f
+        val halfH = (geom.height * heightPx) / 2f
 
         when (mask.shape) {
             MaskShape.NONE -> {
                 path.addRect(0f, 0f, widthPx, heightPx, Path.Direction.CW)
             }
             MaskShape.RECTANGLE -> {
-                val rect = RectF(cx - mw / 2f, cy - mh / 2f, cx + mw / 2f, cy + mh / 2f)
-                val cr = (minOf(mw, mh) * mask.cornerRadius.coerceIn(0f, 0.5f))
-                path.addRoundRect(rect, cr, cr, Path.Direction.CW)
+                val rect = RectF(cx - halfW, cy - halfH, cx + halfW, cy + halfH)
+                val cornerPx = mask.cornerRadius.coerceIn(0f, 0.5f) * minOf(rect.width(), rect.height())
+                path.addRoundRect(rect, cornerPx, cornerPx, Path.Direction.CW)
                 rotatePath(path, geom.rotationDegrees, cx, cy)
             }
             MaskShape.CIRCLE -> {
-                val rect = RectF(cx - mw / 2f, cy - mh / 2f, cx + mw / 2f, cy + mh / 2f)
+                val rect = RectF(cx - halfW, cy - halfH, cx + halfW, cy + halfH)
                 path.addOval(rect, Path.Direction.CW)
                 rotatePath(path, geom.rotationDegrees, cx, cy)
             }
             MaskShape.LINEAR_SPLIT -> {
-                val diag = maxOf(widthPx, heightPx) * 2f
-                val rect = RectF(cx - diag, cy - diag, cx + diag, cy)
-                path.addRect(rect, Path.Direction.CW)
+                val big = maxOf(widthPx, heightPx) * 2.5f
+                path.addRect(cx - big, cy - big, cx, cy + big, Path.Direction.CW)
                 rotatePath(path, geom.rotationDegrees, cx, cy)
             }
             MaskShape.FREEHAND_PEN -> {
                 val pts = mask.penPoints
                 if (pts.size >= 3) {
-                    val first = pts[0]
-                    val last = pts.last()
-                    val startMidX = ((last.x + first.x) / 2f) * widthPx
-                    val startMidY = ((last.y + first.y) / 2f) * heightPx
-                    path.moveTo(startMidX, startMidY)
-                    for (i in pts.indices) {
-                        val curr = pts[i]
-                        val next = pts[(i + 1) % pts.size]
-                        val midX = ((curr.x + next.x) / 2f) * widthPx
-                        val midY = ((curr.y + next.y) / 2f) * heightPx
-                        path.quadTo(curr.x * widthPx, curr.y * heightPx, midX, midY)
+                    val scale = (1f + mask.expansion).coerceIn(0.4f, 1.8f)
+                    val meanX = pts.map { it.x }.average().toFloat()
+                    val meanY = pts.map { it.y }.average().toFloat()
+                    val scaledPts = pts.map { pt ->
+                        MaskPoint(
+                            x = (meanX + (pt.x - meanX) * scale) * widthPx,
+                            y = (meanY + (pt.y - meanY) * scale) * heightPx
+                        )
+                    }
+                    // Smooth quadratic Bezier closed loop through midpoints
+                    val firstMidX = (scaledPts.last().x + scaledPts.first().x) / 2f
+                    val firstMidY = (scaledPts.last().y + scaledPts.first().y) / 2f
+                    path.moveTo(firstMidX, firstMidY)
+                    for (i in scaledPts.indices) {
+                        val curr = scaledPts[i]
+                        val next = scaledPts[(i + 1) % scaledPts.size]
+                        val midX = (curr.x + next.x) / 2f
+                        val midY = (curr.y + next.y) / 2f
+                        path.quadTo(curr.x, curr.y, midX, midY)
                     }
                     path.close()
                 }
@@ -182,71 +186,58 @@ object MaskGeometryEvaluator {
         return path
     }
 
+    /**
+     * Applies [mask] with feathering, invert, and opacity onto [source], returning a new ARGB bitmap.
+     */
     fun applyMaskToBitmap(
         source: Bitmap,
         mask: MaskSettings,
-        localTimeMs: Long = 0L
+        timeOffsetMs: Long = 0L
     ): Bitmap {
         if (!mask.isActive) return source
-        val w = source.width
-        val h = source.height
-        val maskBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val maskCanvas = Canvas(maskBitmap)
-        val maskPath = buildAndroidMaskPath(mask, w.toFloat(), h.toFloat(), localTimeMs)
+        val w = source.width.coerceAtLeast(1)
+        val h = source.height.coerceAtLeast(1)
+        val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
 
-        val feather = mask.featherPx.coerceIn(0f, 50f) * (minOf(w, h) / 360f).coerceAtLeast(1f)
+        val maskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val maskCanvas = Canvas(maskBmp)
+        val path = buildAndroidPath(mask, w.toFloat(), h.toFloat(), timeOffsetMs)
+
         val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFFFFFFF.toInt()
+            color = Color.WHITE
             style = Paint.Style.FILL
-            if (feather > 0.5f) {
-                maskFilter = BlurMaskFilter(feather.coerceAtMost(80f), BlurMaskFilter.Blur.NORMAL)
+            alpha = (mask.opacity.coerceIn(0f, 1f) * 255f).toInt()
+            if (mask.featherPx > 0.5f) {
+                val radius = (mask.featherPx * (w / 360f)).coerceIn(1f, 80f)
+                maskFilter = BlurMaskFilter(radius, BlurMaskFilter.Blur.NORMAL)
             }
         }
 
         if (mask.invert) {
-            maskCanvas.drawColor(0xFFFFFFFF.toInt())
-            val clearPaint = Paint(maskPaint).apply {
-                xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
-            }
-            maskCanvas.drawPath(maskPath, clearPaint)
+            maskCanvas.drawColor(Color.argb((mask.opacity.coerceIn(0f, 1f) * 255f).toInt(), 255, 255, 255))
+            maskPaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
+            maskCanvas.drawPath(path, maskPaint)
         } else {
-            maskCanvas.drawPath(maskPath, maskPaint)
+            maskCanvas.drawPath(path, maskPaint)
         }
 
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val outCanvas = Canvas(out)
-        val srcPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
-            alpha = (mask.opacity.coerceIn(0f, 1f) * 255f).toInt()
-        }
-        outCanvas.drawBitmap(source, 0f, 0f, srcPaint)
-        val xferPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
-        }
-        outCanvas.drawBitmap(maskBitmap, 0f, 0f, xferPaint)
-        maskBitmap.recycle()
-        return out
+        val layerPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        val saveId = canvas.saveLayer(0f, 0f, w.toFloat(), h.toFloat(), null)
+        canvas.drawBitmap(source, 0f, 0f, layerPaint)
+        layerPaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+        canvas.drawBitmap(maskBmp, 0f, 0f, layerPaint)
+        canvas.restoreToCount(saveId)
+        maskBmp.recycle()
+        return output
     }
 
     private fun rotatePath(path: Path, degrees: Float, px: Float, py: Float) {
-        if (kotlin.math.abs(degrees) < 0.05f) return
-        val m = android.graphics.Matrix()
-        m.postRotate(degrees, px, py)
-        path.transform(m)
-    }
-
-    private fun rotatePointAround(
-        x: Float,
-        y: Float,
-        cx: Float,
-        cy: Float,
-        degrees: Float
-    ): Pair<Float, Float> {
-        val rad = degrees * PI / 180.0
-        val c = cos(rad).toFloat()
-        val s = sin(rad).toFloat()
-        val dx = x - cx
-        val dy = y - cy
-        return (cx + dx * c - dy * s) to (cy + dx * s + dy * c)
+        if (kotlin.math.abs(degrees) > 0.1f) {
+            val m = Matrix()
+            m.postRotate(degrees, px, py)
+            path.transform(m)
+        }
     }
 
     private fun pointInPolygon(x: Float, y: Float, pts: List<MaskPoint>): Boolean {
@@ -258,13 +249,11 @@ object MaskGeometryEvaluator {
             val yi = pts[i].y
             val xj = pts[j].x
             val yj = pts[j].y
-            val intersects = ((yi > y) != (yj > y)) &&
+            val intersect = ((yi > y) != (yj > y)) &&
                 (x < (xj - xi) * (y - yi) / ((yj - yi).takeIf { kotlin.math.abs(it) > 1e-6f } ?: 1e-6f) + xi)
-            if (intersects) inside = !inside
+            if (intersect) inside = !inside
             j = i
         }
         return inside
     }
-
-    private fun lerp(a: Float, b: Float, t: Float): Float = a + (b - a) * t
 }
