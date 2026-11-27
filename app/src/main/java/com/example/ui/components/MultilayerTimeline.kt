@@ -29,9 +29,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BlurOn
+import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Icon
@@ -39,7 +43,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -59,7 +69,10 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.model.AudioClip
+import com.example.model.CaptionClip
 import com.example.model.FilterPreset
+import com.example.model.FxLayer
+import com.example.model.FxType
 import com.example.model.MainClip
 import com.example.model.MainMediaType
 import com.example.model.OverlayBlendMode
@@ -80,6 +93,8 @@ import com.example.ui.theme.SlateDim
 import com.example.ui.theme.StudioSlate
 import com.example.ui.theme.TrackAudioBg
 import com.example.ui.theme.TrackAudioRose
+import com.example.ui.theme.TrackFxBg
+import com.example.ui.theme.TrackFxViolet
 import com.example.ui.theme.TrackOverlayBg
 import com.example.ui.theme.TrackOverlayEmerald
 import com.example.ui.theme.TrackTextAmber
@@ -87,8 +102,12 @@ import com.example.ui.theme.TrackTextBg
 import com.example.ui.theme.TrackVideoBg
 import com.example.ui.theme.TrackVideoBlue
 import com.example.ui.theme.TransitionGold
+import com.example.model.TimelineScrubMath
 import com.example.viewmodel.SelectedItem
+import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 @Composable
 fun MultilayerTimeline(
@@ -98,23 +117,40 @@ fun MultilayerTimeline(
     zoom: Float,
     selection: SelectedItem,
     onSeek: (Long) -> Unit,
+    onPauseForScrub: () -> Unit = {},
     onSelectMainClip: (String) -> Unit,
     onSelectOverlay: (String) -> Unit,
     onSelectAudio: (String) -> Unit,
     onSelectTransition: (String) -> Unit,
+    onSelectCaption: (String) -> Unit = {},
+    onSelectFx: (String) -> Unit = {},
     onTrimMainClip: (String, Long, Long) -> Unit,
     onTrimOverlay: (String, Long, Long) -> Unit,
     onTrimAudio: (String, Long, Long, Long) -> Unit,
+    onMoveCaption: (String, Long, Long) -> Unit = { _, _, _ -> },
+    onMoveFx: (String, Long, Long) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val pxPerSecDp = (64f * zoom).coerceIn(28f, 192f)
     val density = LocalDensity.current
     val pxPerMs = with(density) { (pxPerSecDp.dp.toPx()) / 1000f }
 
-    val totalDurationMs = maxOf(timeline.totalDurationMs, 10_000L)
+    val playableDurationMs = timeline.totalDurationMs.coerceAtLeast(0L)
+    val totalDurationMs = maxOf(playableDurationMs, 10_000L)
     val totalTrackWidthDp = ((totalDurationMs / 1000f) * pxPerSecDp).dp
     val hScrollState = rememberScrollState()
     val vScrollState = rememberScrollState()
+    val coroutineScope = rememberCoroutineScope()
+
+    val latestPlayheadMs by rememberUpdatedState(playheadMs)
+    val latestIsPlaying by rememberUpdatedState(isPlaying)
+    val latestPxPerMs by rememberUpdatedState(pxPerMs)
+    val latestPlayableDurationMs by rememberUpdatedState(playableDurationMs)
+    val latestOnSeek by rememberUpdatedState(onSeek)
+    val latestOnPauseForScrub by rememberUpdatedState(onPauseForScrub)
+
+    var isProgrammaticScroll by remember { mutableStateOf(false) }
+    var isDraggingPlayheadCap by remember { mutableStateOf(false) }
 
     BoxWithConstraints(
         modifier = modifier
@@ -124,12 +160,40 @@ fun MultilayerTimeline(
     ) {
         val halfViewportDp = maxWidth / 2f
         val halfViewportPx = with(density) { halfViewportDp.toPx() }
+        val latestHalfViewportPx by rememberUpdatedState(halfViewportPx)
 
-        // Keep playhead centered during active playback
-        LaunchedEffect(playheadMs, isPlaying, pxPerMs) {
-            if (isPlaying) {
-                val targetScroll = (playheadMs * pxPerMs).roundToInt()
-                hScrollState.scrollTo(targetScroll)
+        // 1. User horizontal timeline scroll -> scrubs playheadMs & video frame in real time
+        LaunchedEffect(hScrollState) {
+            snapshotFlow { hScrollState.value to hScrollState.isScrollInProgress }
+                .collect { (scrollPx, scrolling) ->
+                    if (scrolling && !isProgrammaticScroll && !isDraggingPlayheadCap) {
+                        if (latestIsPlaying) {
+                            latestOnPauseForScrub()
+                        }
+                        val targetMs = TimelineScrubMath.scrollPxToMs(
+                            scrollPx = scrollPx,
+                            pxPerMs = latestPxPerMs,
+                            maxDurationMs = latestPlayableDurationMs
+                        )
+                        if (targetMs != latestPlayheadMs) {
+                            latestOnSeek(targetMs)
+                        }
+                    }
+                }
+        }
+
+        // 2. External playhead changes (playback, step buttons, beat snap, keyframe jump, tap, zoom) -> scroll timeline to center
+        LaunchedEffect(playheadMs, pxPerMs, isPlaying) {
+            if (!hScrollState.isScrollInProgress && !isDraggingPlayheadCap) {
+                val targetScroll = TimelineScrubMath.msToScrollPx(playheadMs, pxPerMs)
+                if (abs(hScrollState.value - targetScroll) > 1) {
+                    isProgrammaticScroll = true
+                    try {
+                        hScrollState.scrollTo(targetScroll)
+                    } finally {
+                        isProgrammaticScroll = false
+                    }
+                }
             }
         }
 
@@ -139,10 +203,12 @@ fun MultilayerTimeline(
                 .fillMaxSize()
                 .horizontalScroll(hScrollState)
                 .verticalScroll(vScrollState)
-                .pointerInput(pxPerMs, halfViewportPx) {
+                .pointerInput(Unit) {
                     detectTapGestures { offset ->
-                        val ms = ((offset.x - halfViewportPx) / pxPerMs).toLong().coerceAtLeast(0L)
-                        onSeek(ms)
+                        val ms = ((offset.x - latestHalfViewportPx) / latestPxPerMs)
+                            .roundToLong()
+                            .coerceIn(0L, latestPlayableDurationMs)
+                        latestOnSeek(ms)
                     }
                 }
         ) {
@@ -153,16 +219,33 @@ fun MultilayerTimeline(
                     .sorted()
             }
 
-            // 1. Time Ruler Row (with amber audio beat markers)
+            // 1. Time Ruler Row (with amber audio beat markers + live non-stale drag scrubbing)
             TimeRulerRow(
                 totalDurationMs = totalDurationMs,
+                playableDurationMs = playableDurationMs,
+                playheadMs = playheadMs,
+                pxPerMs = pxPerMs,
                 beatPositionsMs = allTimelineBeatsMs,
                 pxPerSecDp = pxPerSecDp,
                 leadingPadding = halfViewportDp,
                 trailingPadding = halfViewportDp,
-                onScrubDeltaPx = { deltaPx ->
-                    val deltaMs = (deltaPx / pxPerMs).toLong()
-                    onSeek((playheadMs + deltaMs).coerceIn(0L, timeline.totalDurationMs.coerceAtLeast(0L)))
+                onScrubStart = {
+                    isDraggingPlayheadCap = true
+                    latestOnPauseForScrub()
+                },
+                onScrubToMs = { targetMs ->
+                    latestOnSeek(targetMs)
+                    coroutineScope.launch {
+                        isProgrammaticScroll = true
+                        try {
+                            hScrollState.scrollTo(TimelineScrubMath.msToScrollPx(targetMs, latestPxPerMs))
+                        } finally {
+                            isProgrammaticScroll = false
+                        }
+                    }
+                },
+                onScrubEnd = {
+                    isDraggingPlayheadCap = false
                 }
             )
 
@@ -196,6 +279,38 @@ fun MultilayerTimeline(
                     label = "Overlay Layers (PNG, Chroma Video & Titles)",
                     accent = TrackOverlayEmerald,
                     leadingPadding = halfViewportDp
+                )
+                Spacer(modifier = Modifier.height(5.dp))
+            }
+
+            // 2B. Dedicated Captions Track (CC) when subtitles exist
+            if (timeline.captions.isNotEmpty()) {
+                CaptionsTrackRow(
+                    captions = timeline.captions,
+                    selectedCaptionId = (selection as? SelectedItem.CaptionItem)?.captionId,
+                    pxPerSecDp = pxPerSecDp,
+                    pxPerMs = pxPerMs,
+                    leadingPadding = halfViewportDp,
+                    trailingPadding = halfViewportDp,
+                    totalWidthDp = totalTrackWidthDp,
+                    onSelectCaption = onSelectCaption,
+                    onMoveCaption = onMoveCaption
+                )
+                Spacer(modifier = Modifier.height(5.dp))
+            }
+
+            // 2C. Dedicated Visual FX Track (FX: Magnifier, Mosaic, Blur)
+            if (timeline.fxLayers.isNotEmpty()) {
+                FxTrackRow(
+                    fxLayers = timeline.fxLayers,
+                    selectedFxId = (selection as? SelectedItem.FxItem)?.fxId,
+                    pxPerSecDp = pxPerSecDp,
+                    pxPerMs = pxPerMs,
+                    leadingPadding = halfViewportDp,
+                    trailingPadding = halfViewportDp,
+                    totalWidthDp = totalTrackWidthDp,
+                    onSelectFx = onSelectFx,
+                    onMoveFx = onMoveFx
                 )
                 Spacer(modifier = Modifier.height(5.dp))
             }
@@ -249,28 +364,75 @@ fun MultilayerTimeline(
             Spacer(modifier = Modifier.height(16.dp))
         }
 
-        // Playhead Needle Indicator (positioned at playheadMs relative to horizontal scroll)
-        val playheadX = (halfViewportPx + playheadMs * pxPerMs - hScrollState.value).roundToInt()
+        // Playhead Needle Indicator + Draggable Amber Cap Handle
+        val playheadX = (halfViewportPx + playheadMs * pxPerMs - hScrollState.value)
+            .roundToInt()
+            .coerceIn(0, with(density) { maxWidth.toPx().roundToInt() })
+        val lineHalfW = with(density) { 1.dp.toPx().roundToInt() }
+        val capHitHalfW = with(density) { 22.dp.toPx().roundToInt() }
+
+        // Non-touch-blocking vertical playhead needle
         Box(
             modifier = Modifier
-                .offset { IntOffset(playheadX - 8, 0) }
+                .offset { IntOffset(playheadX - lineHalfW, 0) }
                 .fillMaxHeight()
-                .width(16.dp),
+                .width(2.dp)
+                .background(CinemaAmber)
+        )
+
+        // Generous 44dp x 34dp draggable Playhead Cap Handle over the Time Ruler
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(playheadX - capHitHalfW, 0) }
+                .width(44.dp)
+                .height(34.dp)
+                .testTag("playhead_cap_handle")
+                .pointerInput(Unit) {
+                    var dragMsFloat = 0f
+                    detectHorizontalDragGestures(
+                        onDragStart = {
+                            isDraggingPlayheadCap = true
+                            latestOnPauseForScrub()
+                            dragMsFloat = latestPlayheadMs.toFloat()
+                        },
+                        onDragEnd = {
+                            isDraggingPlayheadCap = false
+                        },
+                        onDragCancel = {
+                            isDraggingPlayheadCap = false
+                        },
+                        onHorizontalDrag = { change, dragAmount ->
+                            change.consume()
+                            dragMsFloat = TimelineScrubMath.applyDragDeltaMs(
+                                currentMsFloat = dragMsFloat,
+                                dragPx = dragAmount,
+                                pxPerMs = latestPxPerMs,
+                                maxDurationMs = latestPlayableDurationMs
+                            )
+                            val targetMs = dragMsFloat.roundToLong()
+                            latestOnSeek(targetMs)
+                            coroutineScope.launch {
+                                isProgrammaticScroll = true
+                                try {
+                                    hScrollState.scrollTo(
+                                        TimelineScrubMath.msToScrollPx(targetMs, latestPxPerMs)
+                                    )
+                                } finally {
+                                    isProgrammaticScroll = false
+                                }
+                            }
+                        }
+                    )
+                },
             contentAlignment = Alignment.TopCenter
         ) {
-            // Glowing Amber Cap
             Box(
                 modifier = Modifier
-                    .size(11.dp)
+                    .padding(top = 3.dp)
+                    .size(if (isDraggingPlayheadCap) 16.dp else 13.dp)
                     .rotate(45f)
-                    .background(CinemaAmber, RoundedCornerShape(2.dp))
-            )
-            // Vertical Playhead Line
-            Box(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .width(2.dp)
-                    .background(CinemaAmber)
+                    .background(CinemaAmber, RoundedCornerShape(3.dp))
+                    .border(1.2.dp, OnAmber, RoundedCornerShape(3.dp))
             )
         }
     }
@@ -279,12 +441,24 @@ fun MultilayerTimeline(
 @Composable
 private fun TimeRulerRow(
     totalDurationMs: Long,
+    playableDurationMs: Long,
+    playheadMs: Long,
+    pxPerMs: Float,
     beatPositionsMs: List<Long>,
     pxPerSecDp: Float,
     leadingPadding: Dp,
     trailingPadding: Dp,
-    onScrubDeltaPx: (Float) -> Unit
+    onScrubStart: () -> Unit,
+    onScrubToMs: (Long) -> Unit,
+    onScrubEnd: () -> Unit
 ) {
+    val latestPlayheadMs by rememberUpdatedState(playheadMs)
+    val latestPxPerMs by rememberUpdatedState(pxPerMs)
+    val latestPlayableMs by rememberUpdatedState(playableDurationMs)
+    val latestOnScrubStart by rememberUpdatedState(onScrubStart)
+    val latestOnScrubToMs by rememberUpdatedState(onScrubToMs)
+    val latestOnScrubEnd by rememberUpdatedState(onScrubEnd)
+
     val totalSecs = ((totalDurationMs / 1000L) + 4L).toInt()
     val stepSecs = when {
         pxPerSecDp < 40f -> 5
@@ -294,13 +468,28 @@ private fun TimeRulerRow(
 
     Row(
         modifier = Modifier
-            .height(26.dp)
+            .height(30.dp)
             .background(InspectorCharcoal)
             .pointerInput(Unit) {
-                detectHorizontalDragGestures { change, dragAmount ->
-                    change.consume()
-                    onScrubDeltaPx(dragAmount)
-                }
+                var dragMsFloat = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = {
+                        latestOnScrubStart()
+                        dragMsFloat = latestPlayheadMs.toFloat()
+                    },
+                    onDragEnd = { latestOnScrubEnd() },
+                    onDragCancel = { latestOnScrubEnd() },
+                    onHorizontalDrag = { change, dragAmount ->
+                        change.consume()
+                        dragMsFloat = TimelineScrubMath.applyDragDeltaMs(
+                            currentMsFloat = dragMsFloat,
+                            dragPx = dragAmount,
+                            pxPerMs = latestPxPerMs,
+                            maxDurationMs = latestPlayableMs
+                        )
+                        latestOnScrubToMs(dragMsFloat.roundToLong())
+                    }
+                )
             }
             .padding(start = leadingPadding, end = trailingPadding),
         verticalAlignment = Alignment.Bottom
@@ -368,6 +557,10 @@ private fun OverlayTrackRow(
     val accent = if (layer.type == OverlayType.TEXT) TrackTextAmber else TrackOverlayEmerald
     val bg = if (layer.type == OverlayType.TEXT) TrackTextBg else TrackOverlayBg
 
+    val latestLayer by rememberUpdatedState(layer)
+    val latestPxPerMs by rememberUpdatedState(pxPerMs)
+    val latestOnTrim by rememberUpdatedState(onTrim)
+
     Box(
         modifier = Modifier
             .padding(start = leadingPadding, end = trailingPadding)
@@ -387,12 +580,21 @@ private fun OverlayTrackRow(
                     shape = RoundedCornerShape(7.dp)
                 )
                 .clickable { onSelect() }
-                .pointerInput(layer.id, pxPerMs) {
-                    detectHorizontalDragGestures { change, dragAmount ->
-                        change.consume()
-                        val deltaMs = (dragAmount / pxPerMs).toLong()
-                        onTrim((layer.startTimeMs + deltaMs).coerceAtLeast(0L), layer.durationMs)
-                    }
+                .pointerInput(layer.id) {
+                    var accumMs = 0f
+                    detectHorizontalDragGestures(
+                        onDragStart = { accumMs = 0f },
+                        onHorizontalDrag = { change, dragAmount ->
+                            change.consume()
+                            accumMs += dragAmount / latestPxPerMs.coerceAtLeast(0.001f)
+                            val deltaMs = accumMs.toLong()
+                            if (deltaMs != 0L) {
+                                accumMs -= deltaMs
+                                val cur = latestLayer
+                                latestOnTrim((cur.startTimeMs + deltaMs).coerceAtLeast(0L), cur.durationMs)
+                            }
+                        }
+                    )
                 },
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -401,10 +603,13 @@ private fun OverlayTrackRow(
                 visible = isSelected,
                 color = CinemaAmber,
                 onDragPx = { dx ->
-                    val deltaMs = (dx / pxPerMs).toLong()
-                    val newStart = (layer.startTimeMs + deltaMs).coerceIn(0L, layer.endTimeMs - 300L)
-                    val newDur = (layer.endTimeMs - newStart).coerceAtLeast(300L)
-                    onTrim(newStart, newDur)
+                    val deltaMs = (dx / latestPxPerMs.coerceAtLeast(0.001f)).roundToLong()
+                    if (deltaMs != 0L) {
+                        val cur = latestLayer
+                        val newStart = (cur.startTimeMs + deltaMs).coerceIn(0L, cur.endTimeMs - 300L)
+                        val newDur = (cur.endTimeMs - newStart).coerceAtLeast(300L)
+                        latestOnTrim(newStart, newDur)
+                    }
                 }
             )
 
@@ -452,10 +657,219 @@ private fun OverlayTrackRow(
                 visible = isSelected,
                 color = CinemaAmber,
                 onDragPx = { dx ->
-                    val deltaMs = (dx / pxPerMs).toLong()
-                    onTrim(layer.startTimeMs, (layer.durationMs + deltaMs).coerceAtLeast(300L))
+                    val deltaMs = (dx / latestPxPerMs.coerceAtLeast(0.001f)).roundToLong()
+                    if (deltaMs != 0L) {
+                        val cur = latestLayer
+                        latestOnTrim(cur.startTimeMs, (cur.durationMs + deltaMs).coerceAtLeast(300L))
+                    }
                 }
             )
+        }
+    }
+}
+
+@Composable
+private fun CaptionsTrackRow(
+    captions: List<CaptionClip>,
+    selectedCaptionId: String?,
+    pxPerSecDp: Float,
+    pxPerMs: Float,
+    leadingPadding: Dp,
+    trailingPadding: Dp,
+    totalWidthDp: Dp,
+    onSelectCaption: (String) -> Unit,
+    onMoveCaption: (String, Long, Long) -> Unit
+) {
+    val latestPxPerMs by rememberUpdatedState(pxPerMs)
+    val latestOnMove by rememberUpdatedState(onMoveCaption)
+    val maxEndDp = captions.maxOfOrNull { ((it.endTimeMs / 1000f) * pxPerSecDp).dp } ?: 0.dp
+
+    Box(
+        modifier = Modifier
+            .padding(start = leadingPadding, end = trailingPadding)
+            .width(maxOf(totalWidthDp + 120.dp, maxEndDp + 64.dp))
+            .height(32.dp)
+            .testTag("captions_timeline_track")
+    ) {
+        for (caption in captions.sortedBy { it.startTimeMs }) {
+            val isSelected = caption.id == selectedCaptionId
+            val startDp = ((caption.startTimeMs / 1000f) * pxPerSecDp).dp
+            val widthDp = ((caption.durationMs / 1000f) * pxPerSecDp).dp.coerceAtLeast(48.dp)
+            val latestCaption by rememberUpdatedState(caption)
+
+            Row(
+                modifier = Modifier
+                    .offset(x = startDp)
+                    .width(widthDp)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(TrackTextBg)
+                    .border(
+                        width = if (isSelected) 2.dp else 1.dp,
+                        color = if (isSelected) CinemaAmber else TrackTextAmber.copy(alpha = 0.75f),
+                        shape = RoundedCornerShape(7.dp)
+                    )
+                    .clickable { onSelectCaption(caption.id) }
+                    .pointerInput(caption.id) {
+                        var accumMs = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { accumMs = 0f },
+                            onHorizontalDrag = { change, dragAmount ->
+                                change.consume()
+                                accumMs += dragAmount / latestPxPerMs.coerceAtLeast(0.001f)
+                                val deltaMs = accumMs.toLong()
+                                if (deltaMs != 0L) {
+                                    accumMs -= deltaMs
+                                    val cur = latestCaption
+                                    val nextStart = (cur.startTimeMs + deltaMs).coerceAtLeast(0L)
+                                    latestOnMove(cur.id, nextStart, nextStart + cur.durationMs)
+                                }
+                            }
+                        )
+                    }
+                    .padding(horizontal = 6.dp)
+                    .testTag("timeline_caption_${caption.id}"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                TrackCodePill(code = "CC", accent = TrackTextAmber)
+                Icon(
+                    imageVector = Icons.Default.Subtitles,
+                    contentDescription = null,
+                    tint = TrackTextAmber,
+                    modifier = Modifier.size(12.dp)
+                )
+                Text(
+                    text = caption.text,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = ChalkWhite,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun FxTrackRow(
+    fxLayers: List<FxLayer>,
+    selectedFxId: String?,
+    pxPerSecDp: Float,
+    pxPerMs: Float,
+    leadingPadding: Dp,
+    trailingPadding: Dp,
+    totalWidthDp: Dp,
+    onSelectFx: (String) -> Unit,
+    onMoveFx: (String, Long, Long) -> Unit
+) {
+    val latestPxPerMs by rememberUpdatedState(pxPerMs)
+    val latestOnMove by rememberUpdatedState(onMoveFx)
+    val maxEndDp = fxLayers.maxOfOrNull { ((it.endTimeMs / 1000f) * pxPerSecDp).dp } ?: 0.dp
+
+    Box(
+        modifier = Modifier
+            .padding(start = leadingPadding, end = trailingPadding)
+            .width(maxOf(totalWidthDp + 120.dp, maxEndDp + 64.dp))
+            .height(34.dp)
+            .testTag("fx_timeline_track")
+    ) {
+        for (fx in fxLayers.sortedBy { it.startTimeMs }) {
+            val isSelected = fx.id == selectedFxId
+            val startDp = ((fx.startTimeMs / 1000f) * pxPerSecDp).dp
+            val widthDp = ((fx.durationMs / 1000f) * pxPerSecDp).dp.coerceAtLeast(52.dp)
+            val latestFx by rememberUpdatedState(fx)
+
+            Row(
+                modifier = Modifier
+                    .offset(x = startDp)
+                    .width(widthDp)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(TrackFxBg)
+                    .border(
+                        width = if (isSelected) 2.dp else 1.dp,
+                        color = if (isSelected) CinemaAmber else TrackFxViolet.copy(alpha = 0.8f),
+                        shape = RoundedCornerShape(7.dp)
+                    )
+                    .clickable { onSelectFx(fx.id) }
+                    .pointerInput(fx.id) {
+                        var accumMs = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { accumMs = 0f },
+                            onHorizontalDrag = { change, dragAmount ->
+                                change.consume()
+                                accumMs += dragAmount / latestPxPerMs.coerceAtLeast(0.001f)
+                                val deltaMs = accumMs.toLong()
+                                if (deltaMs != 0L) {
+                                    accumMs -= deltaMs
+                                    val cur = latestFx
+                                    val nextStart = (cur.startTimeMs + deltaMs).coerceAtLeast(0L)
+                                    latestOnMove(cur.id, nextStart, cur.durationMs)
+                                }
+                            }
+                        )
+                    }
+                    .testTag("timeline_fx_${fx.id}"),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TrimEdgeHandle(
+                    visible = isSelected,
+                    color = CinemaAmber,
+                    onDragPx = { dx ->
+                        val deltaMs = (dx / latestPxPerMs.coerceAtLeast(0.001f)).roundToLong()
+                        if (deltaMs != 0L) {
+                            val cur = latestFx
+                            val newStart = (cur.startTimeMs + deltaMs).coerceIn(0L, cur.endTimeMs - 300L)
+                            val newDur = (cur.endTimeMs - newStart).coerceAtLeast(300L)
+                            latestOnMove(cur.id, newStart, newDur)
+                        }
+                    }
+                )
+
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    TrackCodePill(code = "FX", accent = TrackFxViolet)
+                    Icon(
+                        imageVector = when (fx.type) {
+                            FxType.MAGNIFIER -> Icons.Default.Search
+                            FxType.MOSAIC -> Icons.Default.GridOn
+                            FxType.BLUR -> Icons.Default.BlurOn
+                        },
+                        contentDescription = null,
+                        tint = TrackFxViolet,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Text(
+                        text = fx.type.displayName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = ChalkWhite,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (fx.fullFrame) {
+                        TrackMicroTag("FULL", CinemaAmber)
+                    }
+                }
+
+                TrimEdgeHandle(
+                    visible = isSelected,
+                    color = CinemaAmber,
+                    onDragPx = { dx ->
+                        val deltaMs = (dx / latestPxPerMs.coerceAtLeast(0.001f)).roundToLong()
+                        if (deltaMs != 0L) {
+                            val cur = latestFx
+                            latestOnMove(cur.id, cur.startTimeMs, (cur.durationMs + deltaMs).coerceAtLeast(300L))
+                        }
+                    }
+                )
+            }
         }
     }
 }
@@ -721,6 +1135,8 @@ private fun AudioTrackLaneRow(
     onSelectAudio: (String) -> Unit,
     onTrimAudio: (String, Long, Long, Long) -> Unit
 ) {
+    val latestPxPerMsAudio by rememberUpdatedState(pxPerMs)
+    val latestOnTrimAudio by rememberUpdatedState(onTrimAudio)
     val maxEndDp = clips.maxOfOrNull { ((it.endTimeMs / 1000f) * pxPerSecDp).dp } ?: 0.dp
     Box(
         modifier = Modifier
@@ -760,12 +1176,20 @@ private fun AudioTrackLaneRow(
                         shape = RoundedCornerShape(8.dp)
                     )
                     .clickable { onSelectAudio(clip.id) }
-                    .pointerInput(clip.id, pxPerMs) {
-                        detectHorizontalDragGestures { change, dragAmount ->
-                            change.consume()
-                            val deltaMs = (dragAmount / pxPerMs).toLong()
-                            onTrimAudio(clip.id, deltaMs, 0L, 0L)
-                        }
+                    .pointerInput(clip.id) {
+                        var accumMs = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { accumMs = 0f },
+                            onHorizontalDrag = { change, dragAmount ->
+                                change.consume()
+                                accumMs += dragAmount / latestPxPerMsAudio.coerceAtLeast(0.001f)
+                                val deltaMs = accumMs.toLong()
+                                if (deltaMs != 0L) {
+                                    accumMs -= deltaMs
+                                    latestOnTrimAudio(clip.id, deltaMs, 0L, 0L)
+                                }
+                            }
+                        )
                     }
                     .testTag("audio_clip_${clip.id}")
             ) {
@@ -981,23 +1405,24 @@ private fun TrimEdgeHandle(
     onDragPx: (Float) -> Unit
 ) {
     if (!visible) return
+    val latestOnDragPx by rememberUpdatedState(onDragPx)
     Box(
         modifier = Modifier
             .fillMaxHeight()
-            .width(14.dp)
+            .width(18.dp)
             .background(color)
             .pointerInput(Unit) {
                 detectHorizontalDragGestures { change, dragAmount ->
                     change.consume()
-                    onDragPx(dragAmount)
+                    latestOnDragPx(dragAmount)
                 }
             },
         contentAlignment = Alignment.Center
     ) {
         Box(
             modifier = Modifier
-                .width(2.dp)
-                .height(14.dp)
+                .width(2.5.dp)
+                .height(16.dp)
                 .clip(CircleShape)
                 .background(OnAmber)
         )

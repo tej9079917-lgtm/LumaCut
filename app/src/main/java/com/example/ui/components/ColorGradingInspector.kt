@@ -30,6 +30,8 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.FilterVintage
+import androidx.compose.material.icons.filled.Flare
+import androidx.compose.material.icons.filled.Grain
 import androidx.compose.material.icons.filled.InvertColors
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Refresh
@@ -51,6 +53,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -187,7 +190,8 @@ fun ColorAdjustInspector(
                         ColorPageTab.WHEELS -> !adjustments.lift.isNeutral || !adjustments.gamma.isNeutral || !adjustments.gain.isNeutral
                         ColorPageTab.PRIMARIES -> abs(adjustments.brightness) > 0.005f || abs(adjustments.contrast - 1f) > 0.005f ||
                             abs(adjustments.saturation - 1f) > 0.005f || abs(adjustments.temperature) > 0.005f ||
-                            abs(adjustments.tint) > 0.005f || abs(adjustments.highlights) > 0.005f || abs(adjustments.shadows) > 0.005f
+                            abs(adjustments.tint) > 0.005f || abs(adjustments.highlights) > 0.005f || abs(adjustments.shadows) > 0.005f ||
+                            adjustments.filmGrain > 0.005f || adjustments.halation > 0.005f
                         ColorPageTab.CURVES -> adjustments.hasNonLinearCurve
                         ColorPageTab.LUTS -> !adjustments.cubeLutPath.isNullOrBlank()
                     }
@@ -326,13 +330,15 @@ private fun InteractiveColorWheelCard(
         Spacer(modifier = Modifier.height(6.dp))
 
         // 2D Touch Chromatic Wheel Canvas
+        val latestWheel by rememberUpdatedState(wheel)
+        val latestOnWheelChange by rememberUpdatedState(onWheelChange)
         Box(
             modifier = Modifier
                 .size(86.dp)
                 .clip(CircleShape)
-                .pointerInput(wheel) {
+                .pointerInput(Unit) {
                     detectTapGestures(
-                        onDoubleTap = { onWheelChange(ColorWheelOffset()) },
+                        onDoubleTap = { latestOnWheelChange(ColorWheelOffset()) },
                         onTap = { tap ->
                             val r = (size.width / 2f).coerceAtLeast(1f)
                             val nx = ((tap.x - r) / r).coerceIn(-1f, 1f)
@@ -340,20 +346,21 @@ private fun InteractiveColorWheelCard(
                             val mag = hypot(nx.toDouble(), ny.toDouble()).toFloat()
                             val cx = if (mag > 1f) nx / mag else nx
                             val cy = if (mag > 1f) ny / mag else ny
-                            onWheelChange(wheel.copy(x = cx, y = cy))
+                            latestOnWheelChange(latestWheel.copy(x = cx, y = cy))
                         }
                     )
                 }
-                .pointerInput(wheel) {
+                .pointerInput(Unit) {
                     detectDragGestures { change, dragAmount ->
                         change.consume()
                         val r = (size.width / 2f).coerceAtLeast(1f)
-                        val nx = wheel.x + (dragAmount.x / r)
-                        val ny = wheel.y + (dragAmount.y / r)
+                        val cur = latestWheel
+                        val nx = cur.x + (dragAmount.x / r)
+                        val ny = cur.y + (dragAmount.y / r)
                         val mag = hypot(nx.toDouble(), ny.toDouble()).toFloat()
                         val cx = if (mag > 1f) nx / mag else nx
                         val cy = if (mag > 1f) ny / mag else ny
-                        onWheelChange(wheel.copy(x = cx, y = cy))
+                        latestOnWheelChange(cur.copy(x = cx, y = cy))
                     }
                 }
         ) {
@@ -430,14 +437,14 @@ private fun PrimariesPage(
     adjustments: ColorAdjustments,
     onChange: (ColorAdjustments) -> Unit
 ) {
-    // Quick Cinematic Grade Presets
-    val quickGrades = remember {
+    // Quick Cinematic Grade Presets (applied dynamically onto current adjustments so advanced grades aren't overwritten with stale state)
+    val quickGrades: List<Pair<String, (ColorAdjustments) -> ColorAdjustments>> = remember {
         listOf(
-            "Natural" to ColorAdjustments(),
-            "Warm Gold" to adjustments.copy(brightness = 0.04f, contrast = 1.12f, saturation = 1.18f, temperature = 0.42f, tint = 0.06f),
-            "Cool Cinema" to adjustments.copy(brightness = -0.02f, contrast = 1.16f, saturation = 0.92f, temperature = -0.45f, tint = -0.05f),
-            "Teal Matte" to adjustments.copy(brightness = 0.03f, contrast = 0.90f, saturation = 0.85f, shadows = 0.25f, highlights = -0.20f, temperature = -0.18f),
-            "Punchy HDR" to adjustments.copy(brightness = 0.02f, contrast = 1.32f, saturation = 1.38f, highlights = 0.18f, shadows = -0.12f)
+            "Natural" to { ColorAdjustments() },
+            "Warm Gold" to { cur -> cur.copy(brightness = 0.04f, contrast = 1.12f, saturation = 1.18f, temperature = 0.42f, tint = 0.06f) },
+            "Cool Cinema" to { cur -> cur.copy(brightness = -0.02f, contrast = 1.16f, saturation = 0.92f, temperature = -0.45f, tint = -0.05f) },
+            "Teal Matte" to { cur -> cur.copy(brightness = 0.03f, contrast = 0.90f, saturation = 0.85f, shadows = 0.25f, highlights = -0.20f, temperature = -0.18f) },
+            "Punchy HDR" to { cur -> cur.copy(brightness = 0.02f, contrast = 1.32f, saturation = 1.38f, highlights = 0.18f, shadows = -0.12f) }
         )
     }
     Row(
@@ -447,13 +454,13 @@ private fun PrimariesPage(
             .padding(horizontal = 14.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        quickGrades.forEach { (label, presetAdj) ->
+        quickGrades.forEach { (label, applyPreset) ->
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
                     .background(ActiveRail)
                     .border(1.dp, BorderHairline, RoundedCornerShape(8.dp))
-                    .clickable { onChange(presetAdj) }
+                    .clickable { onChange(applyPreset(adjustments)) }
                     .padding(horizontal = 10.dp, vertical = 5.dp)
                     .testTag("color_preset_${label.lowercase().replace(' ', '_')}"),
                 contentAlignment = Alignment.Center
@@ -552,6 +559,29 @@ private fun PrimariesPage(
         onResetSingle = { onChange(adjustments.copy(shadows = 0f)) },
         testTag = "slider_shadows"
     )
+    ColorGradingSliderRow(
+        icon = Icons.Default.Grain,
+        label = "Film Grain",
+        valueText = "${(adjustments.filmGrain * 100).roundToInt()}%",
+        value = adjustments.filmGrain,
+        range = 0f..1f,
+        isModified = adjustments.filmGrain > 0.005f,
+        onValueChange = { onChange(adjustments.copy(filmGrain = it)) },
+        onResetSingle = { onChange(adjustments.copy(filmGrain = 0f)) },
+        testTag = "slider_film_grain"
+    )
+    ColorGradingSliderRow(
+        icon = Icons.Default.Flare,
+        label = "Halation",
+        valueText = "${(adjustments.halation * 100).roundToInt()}%",
+        value = adjustments.halation,
+        range = 0f..1f,
+        isModified = adjustments.halation > 0.005f,
+        trackAccent = Color(0xFFFF6B35),
+        onValueChange = { onChange(adjustments.copy(halation = it)) },
+        onResetSingle = { onChange(adjustments.copy(halation = 0f)) },
+        testTag = "slider_halation"
+    )
 }
 
 @Composable
@@ -595,6 +625,8 @@ private fun ToneCurvePage(
         Spacer(modifier = Modifier.height(8.dp))
 
         // Interactive 5-Point RGB Tone Curve Editor Canvas
+        val latestAdjustments by rememberUpdatedState(adjustments)
+        val latestOnChange by rememberUpdatedState(onChange)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -602,7 +634,7 @@ private fun ToneCurvePage(
                 .clip(RoundedCornerShape(10.dp))
                 .background(ObsidianBg)
                 .border(1.dp, BorderHairline, RoundedCornerShape(10.dp))
-                .pointerInput(pts) {
+                .pointerInput(Unit) {
                     detectDragGestures(
                         onDragStart = { startOffset ->
                             val fracX = (startOffset.x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f)
@@ -612,21 +644,23 @@ private fun ToneCurvePage(
                             change.consume()
                             val pos = change.position
                             val newY = (1f - (pos.y / size.height.coerceAtLeast(1))).coerceIn(0f, 1f)
-                            val updated = pts.toMutableList()
+                            val cur = latestAdjustments
+                            val updated = cur.normalizedCurvePoints.toMutableList()
                             updated[activeHandleIdx] = newY
-                            onChange(adjustments.copy(curvePoints = updated))
+                            latestOnChange(cur.copy(curvePoints = updated))
                         }
                     )
                 }
-                .pointerInput(pts) {
+                .pointerInput(Unit) {
                     detectTapGestures(
                         onTap = { tap ->
                             val idx = ((tap.x / size.width.coerceAtLeast(1)) * 4f).roundToInt().coerceIn(0, 4)
                             activeHandleIdx = idx
                             val newY = (1f - (tap.y / size.height.coerceAtLeast(1))).coerceIn(0f, 1f)
-                            val updated = pts.toMutableList()
+                            val cur = latestAdjustments
+                            val updated = cur.normalizedCurvePoints.toMutableList()
                             updated[idx] = newY
-                            onChange(adjustments.copy(curvePoints = updated))
+                            latestOnChange(cur.copy(curvePoints = updated))
                         }
                     )
                 }

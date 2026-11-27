@@ -4,13 +4,17 @@ import com.example.model.AiCutoutSettings
 import com.example.model.AspectRatio
 import com.example.model.AudioClip
 import com.example.model.AudioSettings
+import com.example.model.CanvasBackdrop
 import com.example.model.CaptionClip
 import com.example.model.ClipTransform
 import com.example.model.ColorAdjustments
 import com.example.model.FilterPreset
+import com.example.model.FxLayer
 import com.example.model.MainClip
 import com.example.model.MaskSettings
 import com.example.model.OverlayLayer
+import com.example.model.PanZoomSpec
+import com.example.model.SafeZoneOverlay
 import com.example.model.TimelineDocument
 import com.example.model.TransformKeyframe
 import com.example.model.TransitionSpec
@@ -39,7 +43,8 @@ enum class CommandCategory {
     SPEED,
     CUTOUT,
     MASK,
-    CAPTIONS
+    CAPTIONS,
+    FX
 }
 
 /**
@@ -1016,4 +1021,174 @@ data class DeleteCaptionCommand(
             )
         )
 }
+
+data class ReplaceMainClipsCommand(
+    val beforeClips: List<MainClip>,
+    val afterClips: List<MainClip>,
+    override val label: String,
+    override val category: CommandCategory = CommandCategory.SPEED,
+    override val timestampMs: Long = System.currentTimeMillis()
+) : EditCommand {
+    override val mergeKey: String? = null
+
+    override fun execute(state: EditorDocumentState): EditorDocumentState =
+        state.copy(timeline = state.timeline.copy(mainClips = afterClips))
+
+    override fun undo(state: EditorDocumentState): EditorDocumentState =
+        state.copy(timeline = state.timeline.copy(mainClips = beforeClips))
+}
+
+data class ExtractAudioCommand(
+    val sourceClipId: String,
+    val beforeClipAudio: AudioSettings,
+    val extractedAudioClip: AudioClip,
+    override val label: String = "Extract Audio",
+    override val timestampMs: Long = System.currentTimeMillis()
+) : EditCommand {
+    override val category: CommandCategory = CommandCategory.AUDIO
+    override val mergeKey: String? = null
+
+    override fun execute(state: EditorDocumentState): EditorDocumentState =
+        state.copy(
+            timeline = state.timeline.copy(
+                mainClips = state.timeline.mainClips.map {
+                    if (it.id == sourceClipId) it.copy(audio = beforeClipAudio.copy(isMuted = true)) else it
+                },
+                audioClips = state.timeline.audioClips + extractedAudioClip
+            )
+        )
+
+    override fun undo(state: EditorDocumentState): EditorDocumentState =
+        state.copy(
+            timeline = state.timeline.copy(
+                mainClips = state.timeline.mainClips.map {
+                    if (it.id == sourceClipId) it.copy(audio = beforeClipAudio) else it
+                },
+                audioClips = state.timeline.audioClips.filterNot { it.id == extractedAudioClip.id }
+            )
+        )
+}
+
+data class CanvasBackdropCommand(
+    val before: CanvasBackdrop,
+    val after: CanvasBackdrop,
+    override val label: String = "Canvas Backdrop",
+    override val timestampMs: Long = System.currentTimeMillis()
+) : EditCommand {
+    override val category: CommandCategory = CommandCategory.CANVAS
+    override val mergeKey: String = "canvas_backdrop"
+
+    override fun execute(state: EditorDocumentState): EditorDocumentState =
+        state.copy(timeline = state.timeline.copy(canvasBackdrop = after))
+
+    override fun undo(state: EditorDocumentState): EditorDocumentState =
+        state.copy(timeline = state.timeline.copy(canvasBackdrop = before))
+
+    override fun mergeWith(newer: EditCommand): EditCommand? {
+        if (newer !is CanvasBackdropCommand) return null
+        return copy(after = newer.after, timestampMs = newer.timestampMs)
+    }
+}
+
+data class SafeZoneOverlayCommand(
+    val before: SafeZoneOverlay,
+    val after: SafeZoneOverlay,
+    override val label: String = "Safe Zone: ${after.label}",
+    override val timestampMs: Long = System.currentTimeMillis()
+) : EditCommand {
+    override val category: CommandCategory = CommandCategory.CANVAS
+    override val mergeKey: String? = null
+
+    override fun execute(state: EditorDocumentState): EditorDocumentState =
+        state.copy(timeline = state.timeline.copy(safeZoneOverlay = after))
+
+    override fun undo(state: EditorDocumentState): EditorDocumentState =
+        state.copy(timeline = state.timeline.copy(safeZoneOverlay = before))
+}
+
+data class AddFxLayerCommand(
+    val fxLayer: FxLayer,
+    override val label: String = "Add ${fxLayer.type.displayName} FX",
+    override val timestampMs: Long = System.currentTimeMillis()
+) : EditCommand {
+    override val category: CommandCategory = CommandCategory.FX
+    override val mergeKey: String? = null
+
+    override fun execute(state: EditorDocumentState): EditorDocumentState =
+        state.copy(timeline = state.timeline.copy(fxLayers = state.timeline.fxLayers + fxLayer))
+
+    override fun undo(state: EditorDocumentState): EditorDocumentState =
+        state.copy(timeline = state.timeline.copy(fxLayers = state.timeline.fxLayers.filterNot { it.id == fxLayer.id }))
+}
+
+data class UpdateFxLayerCommand(
+    val fxId: String,
+    val before: FxLayer,
+    val after: FxLayer,
+    override val label: String = "Edit ${after.type.displayName} FX",
+    override val timestampMs: Long = System.currentTimeMillis()
+) : EditCommand {
+    override val category: CommandCategory = CommandCategory.FX
+    override val mergeKey: String = "fx_edit:$fxId"
+
+    override fun execute(state: EditorDocumentState): EditorDocumentState = apply(state, after)
+    override fun undo(state: EditorDocumentState): EditorDocumentState = apply(state, before)
+
+    override fun mergeWith(newer: EditCommand): EditCommand? {
+        if (newer !is UpdateFxLayerCommand || newer.fxId != fxId) return null
+        return copy(after = newer.after, label = newer.label, timestampMs = newer.timestampMs)
+    }
+
+    private fun apply(state: EditorDocumentState, target: FxLayer): EditorDocumentState =
+        state.copy(
+            timeline = state.timeline.copy(
+                fxLayers = state.timeline.fxLayers.map { if (it.id == fxId) target else it }
+            )
+        )
+}
+
+data class DeleteFxLayerCommand(
+    val removedFx: FxLayer,
+    override val label: String = "Delete ${removedFx.type.displayName} FX",
+    override val timestampMs: Long = System.currentTimeMillis()
+) : EditCommand {
+    override val category: CommandCategory = CommandCategory.FX
+    override val mergeKey: String? = null
+
+    override fun execute(state: EditorDocumentState): EditorDocumentState =
+        state.copy(timeline = state.timeline.copy(fxLayers = state.timeline.fxLayers.filterNot { it.id == removedFx.id }))
+
+    override fun undo(state: EditorDocumentState): EditorDocumentState =
+        state.copy(timeline = state.timeline.copy(fxLayers = (state.timeline.fxLayers + removedFx).sortedBy { it.startTimeMs }))
+}
+
+data class MainClipPanZoomCommand(
+    val clipId: String,
+    val before: PanZoomSpec,
+    val after: PanZoomSpec,
+    override val label: String = "Edit Pan & Zoom",
+    override val timestampMs: Long = System.currentTimeMillis()
+) : EditCommand {
+    override val category: CommandCategory = CommandCategory.MOTION
+    override val mergeKey: String = "pan_zoom:$clipId"
+
+    override fun execute(state: EditorDocumentState): EditorDocumentState = apply(state, after)
+    override fun undo(state: EditorDocumentState): EditorDocumentState = apply(state, before)
+
+    override fun mergeWith(newer: EditCommand): EditCommand? {
+        if (newer !is MainClipPanZoomCommand || newer.clipId != clipId) return null
+        return copy(after = newer.after, label = newer.label, timestampMs = newer.timestampMs)
+    }
+
+    private fun apply(state: EditorDocumentState, spec: PanZoomSpec): EditorDocumentState =
+        state.copy(
+            timeline = state.timeline.copy(
+                mainClips = state.timeline.mainClips.map {
+                    if (it.id == clipId) it.copy(panZoom = spec) else it
+                }
+            )
+        )
+}
+
+
 

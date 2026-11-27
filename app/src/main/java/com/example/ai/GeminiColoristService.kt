@@ -19,8 +19,18 @@ data class AiColorGradeResult(
     val coloristNote: String
 )
 
+data class AiCreativeIdeasResult(
+    val hooks: List<String>,
+    val titles: List<String>,
+    val hashtags: List<String>,
+    val editTips: List<String>
+)
+
 /**
- * Firebase AI Logic service powering LumaCut's Gemini AI Colorist and AI Smart Script Captions.
+ * Firebase AI Logic service powering LumaCut's Gemini AI Studio:
+ * - AI Colorist (multimodal frame + prompt -> color wheels & primaries)
+ * - AI Smart Script Captions (script -> timed karaoke CaptionClip blocks)
+ * - AI Hooks, Viral Titles & Smart Edit Ideas
  * Uses `gemini-3.8-flash` with strict JSON Schema output and App Check attestation.
  */
 object GeminiColoristService {
@@ -66,6 +76,27 @@ object GeminiColoristService {
         )
     )
 
+    private val creativeIdeasSchema = Schema.obj(
+        properties = mapOf(
+            "hooks" to Schema.array(
+                items = Schema.string(description = "Punchy 3 to 8 word opening hook suitable as bold on-screen text"),
+                description = "Exactly 3 scroll-stopping opening hooks"
+            ),
+            "titles" to Schema.array(
+                items = Schema.string(description = "Compelling short-form video title"),
+                description = "3 ready-to-post video titles"
+            ),
+            "hashtags" to Schema.array(
+                items = Schema.string(description = "Relevant hashtag starting with #"),
+                description = "6 targeted hashtags"
+            ),
+            "editTips" to Schema.array(
+                items = Schema.string(description = "Actionable editing recommendation mentioning pacing, transitions, SFX, or color"),
+                description = "3 specific editing tips tailored to this project"
+            )
+        )
+    )
+
     private val coloristModel by lazy {
         Firebase.ai.generativeModel(
             modelName = MODEL_NAME,
@@ -84,6 +115,43 @@ object GeminiColoristService {
                 responseMimeType = "application/json"
                 responseSchema = timedCaptionsSchema
                 temperature = 0.3f
+            }
+        )
+    }
+
+    private val audioTranscriptionSchema = Schema.obj(
+        properties = mapOf(
+            "segments" to Schema.array(
+                items = Schema.obj(
+                    properties = mapOf(
+                        "startMs" to Schema.integer(description = "Segment start time in milliseconds relative to start of audio"),
+                        "endMs" to Schema.integer(description = "Segment end time in milliseconds relative to start of audio"),
+                        "text" to Schema.string(description = "Accurate spoken subtitle phrase (2 to 7 words)")
+                    )
+                ),
+                description = "Chronological spoken subtitle segments transcribed directly from the audio track"
+            )
+        )
+    )
+
+    private val ideasModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = MODEL_NAME,
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = creativeIdeasSchema
+                temperature = 0.7f
+            }
+        )
+    }
+
+    private val audioTranscriptionModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = MODEL_NAME,
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = audioTranscriptionSchema
+                temperature = 0.2f
             }
         )
     }
@@ -205,6 +273,144 @@ object GeminiColoristService {
                 Result.failure(IllegalStateException("Could not extract subtitle blocks from script."))
             } else {
                 Result.success(clips)
+            }
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun generateHooksAndEditIdeas(
+        frameBitmap: Bitmap?,
+        topic: String,
+        clipCount: Int,
+        durationMs: Long
+    ): Result<AiCreativeIdeasResult> {
+        val trimmed = topic.trim()
+        if (trimmed.isEmpty() && frameBitmap == null) {
+            return Result.failure(IllegalArgumentException("Describe your video topic or add a clip first."))
+        }
+
+        return try {
+            val scaledFrame = frameBitmap?.let { scaleForVision(it, maxDim = 640) }
+            val seconds = (durationMs / 1000L).coerceAtLeast(1L)
+            val instruction = buildString {
+                append("You are an expert short-form video director and editor for Reels, TikTok, and YouTube Shorts. ")
+                append("The creator's current timeline has $clipCount clip(s) totaling ~${seconds}s. ")
+                if (trimmed.isNotEmpty()) {
+                    append("Video topic / vibe: \"$trimmed\". ")
+                } else {
+                    append("Analyze the attached video frame to infer the subject and mood. ")
+                }
+                append("Generate 3 punchy on-screen opening hooks (3-8 words each), 3 titles, 6 hashtags, ")
+                append("and 3 concrete editing tips (e.g., where to use Whip Pan transitions, Speed Ramps, Whoosh SFX, or Karaoke Captions).")
+            }
+
+            val response = withTimeout(REQUEST_TIMEOUT_MS) {
+                val inputContent = content {
+                    if (scaledFrame != null) {
+                        image(scaledFrame)
+                    }
+                    text(instruction)
+                }
+                ideasModel.generateContent(inputContent)
+            }
+
+            val rawJson = response.text?.trim()
+                ?: return Result.failure(IllegalStateException("Gemini returned an empty response."))
+
+            val root = JSONObject(rawJson)
+            fun readList(key: String): List<String> {
+                val arr = root.optJSONArray(key) ?: return emptyList()
+                return (0 until arr.length()).mapNotNull { i ->
+                    arr.optString(i, "").trim().takeIf { it.isNotEmpty() }
+                }
+            }
+
+            val result = AiCreativeIdeasResult(
+                hooks = readList("hooks"),
+                titles = readList("titles"),
+                hashtags = readList("hashtags"),
+                editTips = readList("editTips")
+            )
+            if (result.hooks.isEmpty() && result.titles.isEmpty() && result.editTips.isEmpty()) {
+                Result.failure(IllegalStateException("Gemini did not return usable creative ideas."))
+            } else {
+                Result.success(result)
+            }
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun transcribeAudioToCaptions(
+        audioBytes: ByteArray,
+        mimeType: String,
+        clipStartOnTimelineMs: Long,
+        clipDurationMs: Long,
+        languageHint: String = "Auto",
+        maxWordsPerLine: Int = 5
+    ): Result<List<CaptionClip>> {
+        if (audioBytes.isEmpty()) {
+            return Result.failure(IllegalArgumentException("No audio data available for transcription."))
+        }
+
+        return try {
+            val langInstruction = if (languageHint.equals("Auto", ignoreCase = true) || languageHint.isBlank()) {
+                "Detect the spoken language automatically and transcribe in that language."
+            } else {
+                "Transcribe the spoken audio in $languageHint."
+            }
+            val prompt = buildString {
+                append("Transcribe all spoken words from the attached audio accurately into short, punchy video subtitles. ")
+                append("$langInstruction ")
+                append("Keep each segment concise (around 2 to ${maxWordsPerLine.coerceIn(3, 8)} words) with accurate startMs and endMs timestamps ")
+                append("within 0 to ${clipDurationMs.coerceAtLeast(1000L)} milliseconds. ")
+                append("If there is no speech, return an empty segments array.")
+            }
+
+            val response = withTimeout(REQUEST_TIMEOUT_MS) {
+                val inputContent = content {
+                    inlineData(audioBytes, mimeType)
+                    text(prompt)
+                }
+                audioTranscriptionModel.generateContent(inputContent)
+            }
+
+            val rawJson = response.text?.trim()
+                ?: return Result.failure(IllegalStateException("Gemini returned an empty transcription response."))
+
+            val root = JSONObject(rawJson)
+            val arr = root.optJSONArray("segments")
+                ?: return Result.failure(IllegalStateException("No speech segments found in audio."))
+
+            val clips = mutableListOf<CaptionClip>()
+            val baseOffset = clipStartOnTimelineMs.coerceAtLeast(0L)
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val text = obj.optString("text", "").trim()
+                if (text.isEmpty()) continue
+                val relStart = obj.optLong("startMs", 0L).coerceIn(0L, clipDurationMs.coerceAtLeast(500L))
+                val relEnd = obj.optLong("endMs", relStart + 1500L)
+                    .coerceAtLeast(relStart + 450L)
+                    .coerceAtMost(clipDurationMs.coerceAtLeast(relStart + 450L))
+                clips.add(
+                    CaptionClip(
+                        text = text,
+                        startTimeMs = baseOffset + relStart,
+                        endTimeMs = baseOffset + relEnd,
+                        animationPreset = CaptionAnimationPreset.ACTIVE_WORD_HIGHLIGHT
+                    )
+                )
+            }
+
+            if (clips.isEmpty()) {
+                Result.failure(IllegalStateException("No clear speech was detected in this audio clip."))
+            } else {
+                Result.success(clips.sortedBy { it.startTimeMs })
             }
         } catch (ce: CancellationException) {
             throw ce

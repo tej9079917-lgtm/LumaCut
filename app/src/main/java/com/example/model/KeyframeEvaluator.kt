@@ -10,35 +10,66 @@ import kotlin.math.abs
 object KeyframeEvaluator {
 
     fun evaluate(clip: MainClip, localTimelineMs: Long): ClipTransform {
-        if (clip.keyframes.isEmpty()) return clip.baseTransform
-        val sorted = clip.keyframes.sortedBy { it.timeOffsetMs }
-        if (sorted.size == 1) return sorted.first().toTransform()
-
+        val base = clip.baseTransform
         val clampedMs = localTimelineMs.coerceIn(0L, clip.durationMs.coerceAtLeast(1L))
-        if (clampedMs <= sorted.first().timeOffsetMs) {
-            return sorted.first().toTransform()
-        }
-        if (clampedMs >= sorted.last().timeOffsetMs) {
-            return sorted.last().toTransform()
+
+        val animated: ClipTransform = if (clip.keyframes.isNotEmpty()) {
+            val sorted = clip.keyframes.sortedBy { it.timeOffsetMs }
+            val raw = when {
+                sorted.size == 1 -> sorted.first().toTransform()
+                clampedMs <= sorted.first().timeOffsetMs -> sorted.first().toTransform()
+                clampedMs >= sorted.last().timeOffsetMs -> sorted.last().toTransform()
+                else -> {
+                    var found = sorted.last().toTransform()
+                    for (i in 0 until sorted.lastIndex) {
+                        val k0 = sorted[i]
+                        val k1 = sorted[i + 1]
+                        if (clampedMs in k0.timeOffsetMs..k1.timeOffsetMs) {
+                            val span = (k1.timeOffsetMs - k0.timeOffsetMs).coerceAtLeast(1L)
+                            val rawT = ((clampedMs - k0.timeOffsetMs).toFloat() / span.toFloat()).coerceIn(0f, 1f)
+                            val t = applyEasing(rawT, k1.easing)
+                            found = ClipTransform(
+                                offsetX = lerpFloat(k0.offsetX, k1.offsetX, t),
+                                offsetY = lerpFloat(k0.offsetY, k1.offsetY, t),
+                                scale = lerpFloat(k0.scale, k1.scale, t),
+                                rotationDegrees = lerpFloat(k0.rotationDegrees, k1.rotationDegrees, t),
+                                opacity = lerpFloat(k0.opacity, k1.opacity, t).coerceIn(0f, 1f)
+                            )
+                            break
+                        }
+                    }
+                    found
+                }
+            }
+            raw.copy(
+                flipHorizontal = base.flipHorizontal,
+                flipVertical = base.flipVertical,
+                fullFrameFill = base.fullFrameFill,
+                crop = base.crop
+            )
+        } else {
+            base
         }
 
-        for (i in 0 until sorted.lastIndex) {
-            val k0 = sorted[i]
-            val k1 = sorted[i + 1]
-            if (clampedMs in k0.timeOffsetMs..k1.timeOffsetMs) {
-                val span = (k1.timeOffsetMs - k0.timeOffsetMs).coerceAtLeast(1L)
-                val rawT = ((clampedMs - k0.timeOffsetMs).toFloat() / span.toFloat()).coerceIn(0f, 1f)
-                val t = applyEasing(rawT, k1.easing)
-                return ClipTransform(
-                    offsetX = lerpFloat(k0.offsetX, k1.offsetX, t),
-                    offsetY = lerpFloat(k0.offsetY, k1.offsetY, t),
-                    scale = lerpFloat(k0.scale, k1.scale, t),
-                    rotationDegrees = lerpFloat(k0.rotationDegrees, k1.rotationDegrees, t),
-                    opacity = lerpFloat(k0.opacity, k1.opacity, t).coerceIn(0f, 1f)
-                )
-            }
-        }
-        return sorted.last().toTransform()
+        // Apply KineMaster-style Pan & Zoom smoothly across clip duration when enabled
+        val pz = clip.panZoom
+        if (!pz.enabled) return animated
+
+        val progress = (clampedMs.toFloat() / clip.durationMs.coerceAtLeast(1L).toFloat()).coerceIn(0f, 1f)
+        val easedT = applyEasing(progress, KeyframeEasing.EASE_IN_OUT)
+        val endScale = if (pz.linked) pz.startScale else pz.endScale
+        val endX = if (pz.linked) pz.startOffsetX else pz.endOffsetX
+        val endY = if (pz.linked) pz.startOffsetY else pz.endOffsetY
+
+        val pzScale = lerpFloat(pz.startScale, endScale, easedT).coerceIn(0.35f, 4.0f)
+        val pzOffsetX = lerpFloat(pz.startOffsetX, endX, easedT)
+        val pzOffsetY = lerpFloat(pz.startOffsetY, endY, easedT)
+
+        return animated.copy(
+            scale = (animated.scale * pzScale).coerceIn(0.25f, 5.0f),
+            offsetX = (animated.offsetX + pzOffsetX).coerceIn(-1.5f, 1.5f),
+            offsetY = (animated.offsetY + pzOffsetY).coerceIn(-1.5f, 1.5f)
+        )
     }
 
     fun applyEasing(t: Float, easing: KeyframeEasing): Float {

@@ -39,6 +39,8 @@ import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import androidx.media3.transformer.VideoEncoderSettings
 import com.example.model.AspectRatio
+import com.example.model.CaptionAnimationPreset
+import com.example.model.CaptionClip
 import com.example.model.ColorMatrixEngine
 import com.example.model.ExportConfig
 import com.example.model.ExportResolution
@@ -47,6 +49,8 @@ import com.example.model.FilterPreset
 import com.example.model.KeyframeEvaluator
 import com.example.model.MainClip
 import com.example.model.MainMediaType
+import com.example.model.MaskSettings
+import com.example.model.MaskShape
 import com.example.model.OverlayLayer
 import com.example.model.OverlayType
 import com.example.model.StudioFont
@@ -54,6 +58,7 @@ import com.example.model.TextMotionEvaluator
 import com.example.model.TextMotionPreset
 import com.example.model.TimelineDocument
 import com.example.model.TransitionType
+import com.example.model.VoiceEffectPreset
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -61,10 +66,70 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.sin
+
+/**
+ * Pure helper for generating standards-compliant 44.1kHz stereo 16-bit PCM silent WAV chunks
+ * and planning gap durations so secondary audio tracks & voiceovers align with their timeline
+ * startTimeMs in Media3 Transformer 1.5.x compositions.
+ */
+object SilentAudioGapHelper {
+    const val SAMPLE_RATE = 44100
+    const val CHANNELS = 2
+    const val BITS_PER_SAMPLE = 16
+    const val DEFAULT_SILENCE_FILE_MS = 5000L
+
+    fun planGapChunkDurationsMs(
+        totalGapMs: Long,
+        maxChunkMs: Long = DEFAULT_SILENCE_FILE_MS
+    ): List<Long> {
+        if (totalGapMs < 20L) return emptyList()
+        val safeMax = maxChunkMs.coerceAtLeast(100L)
+        val chunks = mutableListOf<Long>()
+        var remaining = totalGapMs
+        while (remaining > safeMax) {
+            chunks.add(safeMax)
+            remaining -= safeMax
+        }
+        if (remaining >= 20L || chunks.isEmpty()) {
+            chunks.add(remaining.coerceAtLeast(20L))
+        }
+        return chunks
+    }
+
+    fun buildSilentWavBytes(durationMs: Long): ByteArray {
+        val safeMs = durationMs.coerceIn(20L, 10_000L)
+        val bytesPerSample = BITS_PER_SAMPLE / 8
+        val blockAlign = CHANNELS * bytesPerSample
+        val byteRate = SAMPLE_RATE * blockAlign
+        val frameCount = ((SAMPLE_RATE.toLong() * safeMs) / 1000L).coerceAtLeast(1L)
+        val dataSize = (frameCount * blockAlign).toInt()
+        val riffChunkSize = 36 + dataSize
+
+        val out = ByteArray(44 + dataSize) // zero-initialized = PCM silence
+        val header = ByteBuffer.wrap(out, 0, 44).order(ByteOrder.LITTLE_ENDIAN)
+        header.put('R'.code.toByte()).put('I'.code.toByte()).put('F'.code.toByte()).put('F'.code.toByte())
+        header.putInt(riffChunkSize)
+        header.put('W'.code.toByte()).put('A'.code.toByte()).put('V'.code.toByte()).put('E'.code.toByte())
+        header.put('f'.code.toByte()).put('m'.code.toByte()).put('t'.code.toByte()).put(' '.code.toByte())
+        header.putInt(16) // PCM fmt chunk size
+        header.putShort(1) // PCM format
+        header.putShort(CHANNELS.toShort())
+        header.putInt(SAMPLE_RATE)
+        header.putInt(byteRate)
+        header.putShort(blockAlign.toShort())
+        header.putShort(BITS_PER_SAMPLE.toShort())
+        header.put('d'.code.toByte()).put('a'.code.toByte()).put('t'.code.toByte()).put('a'.code.toByte())
+        header.putInt(dataSize)
+        return out
+    }
+}
 
 @UnstableApi
 class Media3ExportEngine(private val context: Context) {
@@ -101,7 +166,7 @@ class Media3ExportEngine(private val context: Context) {
                         .filter { it.type != OverlayType.VIDEO }
                         .sortedBy { it.zIndex }
                         .associate { layer ->
-                            layer.id to OverlayBitmapRenderer.renderOverlayBitmap(
+                            layer.id to OverlayBitmapRenderer.renderOverlayBitmapWithCutout(
                                 context = context,
                                 overlay = layer,
                                 exportWidth = targetW,
@@ -113,7 +178,18 @@ class Media3ExportEngine(private val context: Context) {
                     val cacheDir = File(context.cacheDir, "exports").apply { mkdirs() }
                     val tempFile = File(cacheDir, "lumacut_tmp_${System.currentTimeMillis()}.mp4")
                     if (tempFile.exists()) tempFile.delete()
-                    Pair(overlayBitmaps, tempFile)
+
+                    val needsAudioGap = timeline.audioClips.any { !it.audio.isMuted && it.startTimeMs >= 20L }
+                    val silenceWavFile = if (needsAudioGap) {
+                        val file = File(cacheDir, "lumacut_silence_5s.wav")
+                        val expectedSize = 44 + (SilentAudioGapHelper.SAMPLE_RATE * SilentAudioGapHelper.CHANNELS * 2 * (SilentAudioGapHelper.DEFAULT_SILENCE_FILE_MS / 1000L)).toInt()
+                        if (!file.exists() || file.length().toInt() != expectedSize) {
+                            file.writeBytes(SilentAudioGapHelper.buildSilentWavBytes(SilentAudioGapHelper.DEFAULT_SILENCE_FILE_MS))
+                        }
+                        file
+                    } else null
+
+                    Triple(overlayBitmaps, tempFile, silenceWavFile)
                 }
             }
 
@@ -122,7 +198,7 @@ class Media3ExportEngine(private val context: Context) {
                 return@launch
             }
 
-            val (overlayBitmaps, tempFile) = prepResult.getOrThrow()
+            val (overlayBitmaps, tempFile, silenceWavFile) = prepResult.getOrThrow()
 
             mainHandler.post {
                 try {
@@ -132,7 +208,8 @@ class Media3ExportEngine(private val context: Context) {
                         targetH = targetH,
                         fps = config.fps,
                         availableFonts = availableFonts,
-                        overlayBitmaps = overlayBitmaps
+                        overlayBitmaps = overlayBitmaps,
+                        silenceWavFile = silenceWavFile
                     )
 
                     val videoEncoderSettings = VideoEncoderSettings.Builder()
@@ -248,7 +325,8 @@ class Media3ExportEngine(private val context: Context) {
         targetH: Int,
         fps: Int,
         availableFonts: List<StudioFont>,
-        overlayBitmaps: Map<String, Bitmap>
+        overlayBitmaps: Map<String, Bitmap>,
+        silenceWavFile: File? = null
     ): Composition {
         val ranges = timeline.mainClipRanges()
         val sortedBitmapOverlays = timeline.overlays
@@ -297,18 +375,28 @@ class Media3ExportEngine(private val context: Context) {
                 videoEffects.add(SpeedChangeEffect(clip.safeSpeed))
             }
 
-            // 1c. Keyframe Animation (Position, Scale, Rotation with Easing)
-            if (clip.keyframes.isNotEmpty() || !clip.baseTransform.isIdentity) {
+            // 1c. Keyframe Animation, Pan & Zoom, Mirror/Flip Full & Transform Matrix
+            if (clip.keyframes.isNotEmpty() || !clip.baseTransform.isIdentity || clip.panZoom.enabled) {
                 videoEffects.add(createKeyframeMotionEffect(clip))
             }
 
-            // 2. Apply preset filter + primary color grading + fade transitions + keyframe opacity via RgbMatrix
+            // 2. Apply preset filter + primary color grading + fade/flare/glitch transitions + keyframe opacity via RgbMatrix
+            val colorTransitionTypes = setOf(
+                TransitionType.CROSSFADE,
+                TransitionType.DIP_TO_BLACK,
+                TransitionType.DIP_TO_WHITE,
+                TransitionType.FILM_BURN,
+                TransitionType.LIGHT_LEAK,
+                TransitionType.GLITCH,
+                TransitionType.DIRECTIONAL_BLUR,
+                TransitionType.WHIP_PAN
+            )
             val hasOpacityAnim = clip.baseTransform.opacity < 0.995f || clip.keyframes.any { it.opacity < 0.995f }
             val needsColorOrFade = clip.filterPreset != FilterPreset.ORIGINAL ||
                 !clip.colorAdjustments.isDefault ||
                 hasOpacityAnim ||
-                incomingTransition?.type in listOf(TransitionType.CROSSFADE, TransitionType.DIP_TO_BLACK, TransitionType.DIP_TO_WHITE) ||
-                outgoingTransition?.type in listOf(TransitionType.CROSSFADE, TransitionType.DIP_TO_BLACK, TransitionType.DIP_TO_WHITE)
+                incomingTransition?.type in colorTransitionTypes ||
+                outgoingTransition?.type in colorTransitionTypes
 
             if (needsColorOrFade) {
                 val primaryOnly = clip.colorAdjustments.copy(
@@ -345,23 +433,80 @@ class Media3ExportEngine(private val context: Context) {
                 videoEffects.add(ColorGradeGlEffect(clip.colorAdjustments))
             }
 
-            // 3. Geometric transition motion (Slide / Zoom / Wipe)
-            val motionType = incomingTransition?.type ?: TransitionType.NONE
-            if (motionType == TransitionType.SLIDE_LEFT ||
-                motionType == TransitionType.SLIDE_RIGHT ||
-                motionType == TransitionType.ZOOM_IN ||
-                motionType == TransitionType.WIPE_RIGHT ||
-                motionType == TransitionType.WIPE_LEFT
-            ) {
-                val halfUs = ((incomingTransition?.durationMs ?: 600L) / 2L).coerceAtLeast(150L) * 1000L
-                videoEffects.add(createMotionTransitionEffect(motionType, halfUs))
+            // 3. Geometric & Cinema FX transition motion (incoming & outgoing seams)
+            val motionTransitionTypes = setOf(
+                TransitionType.SLIDE_LEFT,
+                TransitionType.SLIDE_RIGHT,
+                TransitionType.ZOOM_IN,
+                TransitionType.WIPE_RIGHT,
+                TransitionType.WIPE_LEFT,
+                TransitionType.DIRECTIONAL_BLUR,
+                TransitionType.WHIP_PAN,
+                TransitionType.GLITCH,
+                TransitionType.FILM_BURN,
+                TransitionType.LIGHT_LEAK
+            )
+            val inMotionType = incomingTransition?.type ?: TransitionType.NONE
+            val outMotionType = outgoingTransition?.type ?: TransitionType.NONE
+            if (inMotionType in motionTransitionTypes || outMotionType in motionTransitionTypes) {
+                val inHalfUs = if (inMotionType in motionTransitionTypes) {
+                    ((incomingTransition?.durationMs ?: 600L) / 2L).coerceAtLeast(150L) * 1000L
+                } else 0L
+                val outHalfUs = if (outMotionType in motionTransitionTypes) {
+                    ((outgoingTransition?.durationMs ?: 600L) / 2L).coerceAtLeast(150L) * 1000L
+                } else 0L
+                videoEffects.add(
+                    createMotionTransitionEffect(
+                        clipDurationUs = clip.durationMs * 1000L,
+                        incomingType = inMotionType,
+                        incomingDurUs = inHalfUs,
+                        outgoingType = outMotionType,
+                        outgoingDurUs = outHalfUs
+                    )
+                )
             }
 
-            // 4. Time-synced Text & Image Overlays intersecting this clip
+            // 3b. Interactive Crop framing on main clip (razor-sharp rectangular crop mask)
+            val crop = clip.baseTransform.crop
+            if (crop.isActive) {
+                val cropMask = MaskSettings(
+                    shape = MaskShape.RECTANGLE,
+                    centerX = crop.left + crop.visibleWidthFraction * 0.5f,
+                    centerY = crop.top + crop.visibleHeightFraction * 0.5f,
+                    width = crop.visibleWidthFraction,
+                    height = crop.visibleHeightFraction,
+                    cornerRadius = 0f,
+                    featherPx = 0f
+                )
+                videoEffects.add(MaskGlEffect(mask = cropMask, premultiplyOnBlack = true))
+            }
+
+            // 3c. Shape Mask on main clip (Rectangle, Circle, Linear Split with feather & invert)
+            if (clip.mask.isActive) {
+                videoEffects.add(MaskGlEffect(mask = clip.mask, premultiplyOnBlack = true))
+            }
+
+            // 3d. Time-windowed Visual FX Layers (Magnifier, Mosaic, Gaussian Blur - Spot or Full Frame)
+            val intersectingFx = timeline.fxLayers.filter { fx ->
+                fx.endTimeMs > range.startMs && fx.startTimeMs < range.endMs
+            }
+            for (fx in intersectingFx) {
+                videoEffects.add(
+                    VisualFxGlEffect(
+                        fxLayer = fx,
+                        clipGlobalStartMs = range.startMs
+                    )
+                )
+            }
+
+            // 4. Time-synced Text/Image Overlays & Karaoke Captions intersecting this clip
             val intersectingOverlays = sortedBitmapOverlays.filter { overlay ->
                 overlay.endTimeMs > range.startMs && overlay.startTimeMs < range.endMs
             }
-            if (intersectingOverlays.isNotEmpty()) {
+            val intersectingCaptions = timeline.captions.filter { cap ->
+                cap.endTimeMs > range.startMs && cap.startTimeMs < range.endMs
+            }
+            if (intersectingOverlays.isNotEmpty() || intersectingCaptions.isNotEmpty()) {
                 val textureOverlays = mutableListOf<TextureOverlay>()
                 for (overlay in intersectingOverlays) {
                     val bmp = overlayBitmaps[overlay.id] ?: continue
@@ -376,12 +521,23 @@ class Media3ExportEngine(private val context: Context) {
                         )
                     )
                 }
+                for (caption in intersectingCaptions) {
+                    textureOverlays.add(
+                        TimedCaptionBitmapOverlay(
+                            context = context,
+                            caption = caption,
+                            clipGlobalStartMs = range.startMs,
+                            exportWidth = targetW,
+                            availableFonts = availableFonts
+                        )
+                    )
+                }
                 if (textureOverlays.isNotEmpty()) {
                     videoEffects.add(OverlayEffect(textureOverlays))
                 }
             }
 
-            // 5. Clip audio speed + pitch-shifting, Fairlight 3-Band EQ & gain/fade processors
+            // 5. Clip audio speed + pitch-shifting, Denoise, Voice Effects, Voice Isolation/Noise Gate, 3-Band EQ & gain/fade
             val clipAudioActive = clip.mediaType == MainMediaType.VIDEO &&
                 !clip.audio.isMuted &&
                 (!anyAudioSoloed || clip.audio.isSolo)
@@ -393,6 +549,18 @@ class Media3ExportEngine(private val context: Context) {
                         setPitch(clip.effectiveAudioPitch)
                     }
                     audioProcessors.add(sonic)
+                }
+                if (clip.audio.voiceIsolation || clip.audio.noiseGateDb > -58f || clip.audio.denoiseStrength > 0.02f) {
+                    audioProcessors.add(
+                        VoiceDspAudioProcessor(
+                            voiceIsolation = clip.audio.voiceIsolation,
+                            noiseGateDb = clip.audio.noiseGateDb,
+                            denoiseStrength = clip.audio.denoiseStrength
+                        )
+                    )
+                }
+                if (clip.audio.voiceEffect != VoiceEffectPreset.NONE) {
+                    audioProcessors.add(VoiceEffectAudioProcessor(clip.audio.voiceEffect))
                 }
                 if (clip.audio.hasActiveEq) {
                     audioProcessors.add(
@@ -460,6 +628,14 @@ class Media3ExportEngine(private val context: Context) {
                     )
                 )
             }
+            if (vOverlay.mask.isActive) {
+                overlayVideoEffects.add(
+                    MaskGlEffect(
+                        mask = vOverlay.mask,
+                        premultiplyOnBlack = false
+                    )
+                )
+            }
 
             val editedOverlay = EditedMediaItem.Builder(overlayMediaItem)
                 .setRemoveAudio(true)
@@ -476,10 +652,21 @@ class Media3ExportEngine(private val context: Context) {
         val mainSequence = EditedMediaItemSequence.Builder(mainEditedItems).build()
         sequences.add(mainSequence)
 
-        // Additional Audio Tracks (respecting Solo & Mute + Fairlight 3-Band EQ)
+        // Additional Audio Tracks (respecting Solo & Mute + Fairlight 3-Band EQ + Voice DSP + Auto-Ducking)
         val activeAudioClips = timeline.audioClips
             .filter { !it.audio.isMuted && it.audio.volume > 0.01f && (!anyAudioSoloed || it.audio.isSolo) }
             .sortedBy { it.startTimeMs }
+
+        // Voice windows for Auto-Ducking: voiceover/speech tracks (non-ducked clips or explicit voice tracks)
+        val explicitVoiceWindows = activeAudioClips
+            .filter {
+                !it.audio.autoDuckMusic && (
+                    it.audio.voiceIsolation ||
+                        it.displayName.contains("voice", ignoreCase = true) ||
+                        it.displayName.contains("vo ", ignoreCase = true)
+                    )
+            }
+            .map { it.startTimeMs..it.endTimeMs }
 
         for (audioClip in activeAudioClips) {
             val audioItem = MediaItem.Builder()
@@ -493,6 +680,26 @@ class Media3ExportEngine(private val context: Context) {
                 .build()
 
             val processors = mutableListOf<AudioProcessor>()
+            val voicePitch = audioClip.audio.voiceEffect.pitchFactor
+            if (abs(voicePitch - 1f) > 0.01f) {
+                val sonic = SonicAudioProcessor().apply {
+                    setSpeed(1f)
+                    setPitch(voicePitch)
+                }
+                processors.add(sonic)
+            }
+            if (audioClip.audio.voiceIsolation || audioClip.audio.noiseGateDb > -58f || audioClip.audio.denoiseStrength > 0.02f) {
+                processors.add(
+                    VoiceDspAudioProcessor(
+                        voiceIsolation = audioClip.audio.voiceIsolation,
+                        noiseGateDb = audioClip.audio.noiseGateDb,
+                        denoiseStrength = audioClip.audio.denoiseStrength
+                    )
+                )
+            }
+            if (audioClip.audio.voiceEffect != VoiceEffectPreset.NONE) {
+                processors.add(VoiceEffectAudioProcessor(audioClip.audio.voiceEffect))
+            }
             if (audioClip.audio.hasActiveEq) {
                 processors.add(
                     ThreeBandEqAudioProcessor(
@@ -501,6 +708,21 @@ class Media3ExportEngine(private val context: Context) {
                         highDb = audioClip.audio.eqHighDb
                     )
                 )
+            }
+            if (audioClip.audio.autoDuckMusic) {
+                val duckWindows = explicitVoiceWindows.ifEmpty {
+                    activeAudioClips
+                        .filter { it.id != audioClip.id && !it.audio.autoDuckMusic }
+                        .map { it.startTimeMs..it.endTimeMs }
+                }
+                if (duckWindows.isNotEmpty()) {
+                    processors.add(
+                        AutoDuckAudioProcessor(
+                            clipTimelineStartMs = audioClip.startTimeMs,
+                            voiceWindowsGlobalMs = duckWindows
+                        )
+                    )
+                }
             }
             processors.add(
                 FadeAndGainAudioProcessor(
@@ -517,7 +739,29 @@ class Media3ExportEngine(private val context: Context) {
                 .setEffects(Effects(processors, emptyList()))
                 .build()
 
-            sequences.add(EditedMediaItemSequence.Builder(listOf(editedAudio)).build())
+            val sequenceItems = mutableListOf<EditedMediaItem>()
+            if (audioClip.startTimeMs >= 20L && silenceWavFile != null && silenceWavFile.exists()) {
+                val silenceUri = Uri.fromFile(silenceWavFile)
+                val gapChunks = SilentAudioGapHelper.planGapChunkDurationsMs(audioClip.startTimeMs)
+                for (chunkMs in gapChunks) {
+                    val gapBuilder = MediaItem.Builder().setUri(silenceUri)
+                    if (chunkMs < SilentAudioGapHelper.DEFAULT_SILENCE_FILE_MS) {
+                        gapBuilder.setClippingConfiguration(
+                            MediaItem.ClippingConfiguration.Builder()
+                                .setStartPositionMs(0L)
+                                .setEndPositionMs(chunkMs)
+                                .build()
+                        )
+                    }
+                    sequenceItems.add(
+                        EditedMediaItem.Builder(gapBuilder.build())
+                            .setRemoveVideo(true)
+                            .build()
+                    )
+                }
+            }
+            sequenceItems.add(editedAudio)
+            sequences.add(EditedMediaItemSequence.Builder(sequenceItems).build())
         }
 
         val compBuilder = Composition.Builder(sequences)
@@ -535,15 +779,18 @@ class Media3ExportEngine(private val context: Context) {
                             val globalMs = presentationTimeUs / 1000L
                             val visible = globalMs in layer.startTimeMs..layer.endTimeMs
                             val alpha = if (visible) layer.opacity.coerceIn(0f, 1f) else 0f
-                            val ndcX = (layer.offsetX * 2f).coerceIn(-1.5f, 1.5f)
-                            val ndcY = (-layer.offsetY * 2f).coerceIn(-1.5f, 1.5f)
-                            // Default overlay footprint matches preview (~0.52 of stage) scaled by user scale
-                            val s = (layer.scale * 0.52f).coerceIn(0.15f, 2.5f)
+                            val ndcX = (layer.offsetX * 2f).coerceIn(-2.0f, 2.0f)
+                            val ndcY = (-layer.offsetY * 2f).coerceIn(-2.0f, 2.0f)
+                            // Default overlay footprint matches preview (~0.52 of stage) scaled by user scale, or full frame when Flip Full active
+                            val baseScale = if (layer.fullFrameFill) 1.0f else 0.52f
+                            val s = (layer.scale * baseScale).coerceIn(0.15f, 3.0f)
+                            val sx = if (layer.flipHorizontal) -s else s
+                            val sy = if (layer.flipVertical) -s else s
                             return OverlaySettings.Builder()
                                 .setAlphaScale(alpha)
                                 .setOverlayFrameAnchor(0f, 0f)
                                 .setBackgroundFrameAnchor(ndcX, ndcY)
-                                .setScale(s, s)
+                                .setScale(sx, sy)
                                 .setRotationDegrees(-layer.rotationDegrees)
                                 .build()
                         }
@@ -556,17 +803,20 @@ class Media3ExportEngine(private val context: Context) {
     }
 
     private fun createMotionTransitionEffect(
-        type: TransitionType,
-        durationUs: Long
+        clipDurationUs: Long,
+        incomingType: TransitionType,
+        incomingDurUs: Long,
+        outgoingType: TransitionType,
+        outgoingDurUs: Long
     ): MatrixTransformation = MatrixTransformation { presentationTimeUs ->
         val matrix = Matrix()
-        if (presentationTimeUs < durationUs && durationUs > 0L) {
-            val t = (presentationTimeUs.toFloat() / durationUs.toFloat()).coerceIn(0f, 1f)
-            // Ease-out cubic
+        if (incomingDurUs > 0L && presentationTimeUs < incomingDurUs) {
+            val t = (presentationTimeUs.toFloat() / incomingDurUs.toFloat()).coerceIn(0f, 1f)
             val eased = 1f - (1f - t) * (1f - t) * (1f - t)
-            when (type) {
-                TransitionType.SLIDE_LEFT -> matrix.postTranslate((1f - eased) * 2f, 0f)
-                TransitionType.SLIDE_RIGHT -> matrix.postTranslate(-(1f - eased) * 2f, 0f)
+            val inv = 1f - eased
+            when (incomingType) {
+                TransitionType.SLIDE_LEFT -> matrix.postTranslate(inv * 2f, 0f)
+                TransitionType.SLIDE_RIGHT -> matrix.postTranslate(-inv * 2f, 0f)
                 TransitionType.ZOOM_IN -> {
                     val s = 1.25f - 0.25f * eased
                     matrix.postScale(s, s)
@@ -581,7 +831,63 @@ class Media3ExportEngine(private val context: Context) {
                     matrix.postScale(sx, 1f)
                     matrix.postTranslate(1f - sx, 0f)
                 }
+                TransitionType.DIRECTIONAL_BLUR -> {
+                    val sx = 1f + 0.28f * inv
+                    matrix.postScale(sx, 1f)
+                    matrix.postTranslate(inv * 0.35f, 0f)
+                }
+                TransitionType.WHIP_PAN -> {
+                    val sx = 1f + 0.32f * inv
+                    matrix.postScale(sx, 1f)
+                    matrix.postTranslate(inv * 1.65f, 0f)
+                }
+                TransitionType.GLITCH -> {
+                    val jitter = sin(t * 36.0).toFloat() * 0.14f * inv
+                    val s = 1f + 0.08f * inv
+                    matrix.postScale(s, s)
+                    matrix.postTranslate(jitter, -jitter * 0.35f)
+                }
+                TransitionType.FILM_BURN, TransitionType.LIGHT_LEAK -> {
+                    val s = 1f + 0.07f * inv
+                    matrix.postScale(s, s)
+                }
                 else -> Unit
+            }
+        } else if (outgoingDurUs > 0L && clipDurationUs > 0L) {
+            val remaining = (clipDurationUs - presentationTimeUs).coerceAtLeast(0L)
+            if (remaining < outgoingDurUs) {
+                // p goes 0 -> 1 as we approach the cut seam
+                val p = (1f - remaining.toFloat() / outgoingDurUs.toFloat()).coerceIn(0f, 1f)
+                val eased = p * p * p
+                when (outgoingType) {
+                    TransitionType.SLIDE_LEFT -> matrix.postTranslate(-eased * 1.35f, 0f)
+                    TransitionType.SLIDE_RIGHT -> matrix.postTranslate(eased * 1.35f, 0f)
+                    TransitionType.ZOOM_IN -> {
+                        val s = 1f + 0.25f * eased
+                        matrix.postScale(s, s)
+                    }
+                    TransitionType.DIRECTIONAL_BLUR -> {
+                        val sx = 1f + 0.28f * eased
+                        matrix.postScale(sx, 1f)
+                        matrix.postTranslate(-eased * 0.35f, 0f)
+                    }
+                    TransitionType.WHIP_PAN -> {
+                        val sx = 1f + 0.32f * eased
+                        matrix.postScale(sx, 1f)
+                        matrix.postTranslate(-eased * 1.65f, 0f)
+                    }
+                    TransitionType.GLITCH -> {
+                        val jitter = sin(p * 36.0).toFloat() * 0.14f * p
+                        val s = 1f + 0.08f * p
+                        matrix.postScale(s, s)
+                        matrix.postTranslate(jitter, jitter * 0.35f)
+                    }
+                    TransitionType.FILM_BURN, TransitionType.LIGHT_LEAK -> {
+                        val s = 1f + 0.07f * eased
+                        matrix.postScale(s, s)
+                    }
+                    else -> Unit
+                }
             }
         }
         matrix
@@ -591,9 +897,13 @@ class Media3ExportEngine(private val context: Context) {
         MatrixTransformation { presentationTimeUs ->
             val localMs = (presentationTimeUs / 1000L).coerceIn(0L, clip.durationMs)
             val transform = KeyframeEvaluator.evaluate(clip, localMs)
+            val flipX = if (transform.flipHorizontal) -1f else 1f
+            val flipY = if (transform.flipVertical) -1f else 1f
+            val fillBoost = if (transform.fullFrameFill) 1.18f else 1f
+            val effectiveScale = transform.scale * fillBoost
             val matrix = Matrix()
-            if (!transform.isIdentity) {
-                matrix.postScale(transform.scale, transform.scale)
+            if (!transform.isIdentity || flipX < 0f || flipY < 0f || clip.panZoom.enabled) {
+                matrix.postScale(effectiveScale * flipX, effectiveScale * flipY)
                 matrix.postRotate(-transform.rotationDegrees)
                 // OpenGL NDC space is -1..+1 (width 2.0, Y-up)
                 matrix.postTranslate(transform.offsetX * 2f, -transform.offsetY * 2f)
@@ -613,45 +923,87 @@ class Media3ExportEngine(private val context: Context) {
         override fun getMatrix(presentationTimeUs: Long, useHdr: Boolean): FloatArray {
             val localMs = (presentationTimeUs / 1000L).coerceIn(0L, clip.durationMs)
             var dimFactor = KeyframeEvaluator.evaluate(clip, localMs).opacity.coerceIn(0f, 1f)
-            var whiteLift = 0f
+            var liftR = 0f
+            var liftG = 0f
+            var liftB = 0f
+            var gainR = 1f
+            var gainG = 1f
+            var gainB = 1f
 
-            if (incomingDurUs > 0L && presentationTimeUs < incomingDurUs) {
-                val t = (presentationTimeUs.toFloat() / incomingDurUs.toFloat()).coerceIn(0f, 1f)
-                when (incomingType) {
-                    TransitionType.CROSSFADE, TransitionType.DIP_TO_BLACK -> dimFactor *= t
+            fun applySeamColor(type: TransitionType, seamStrength: Float, phase: Float) {
+                val s = seamStrength.coerceIn(0f, 1f)
+                when (type) {
+                    TransitionType.CROSSFADE, TransitionType.DIP_TO_BLACK -> {
+                        dimFactor = minOf(dimFactor, 1f - s)
+                    }
                     TransitionType.DIP_TO_WHITE -> {
-                        dimFactor *= t
-                        whiteLift = 1f - t
+                        dimFactor = minOf(dimFactor, 1f - s)
+                        liftR = maxOf(liftR, s)
+                        liftG = maxOf(liftG, s)
+                        liftB = maxOf(liftB, s)
+                    }
+                    TransitionType.FILM_BURN -> {
+                        // Fiery amber-orange celluloid overexposure peaking at the seam
+                        dimFactor = minOf(dimFactor, 1f - 0.25f * s)
+                        liftR = maxOf(liftR, 0.92f * s)
+                        liftG = maxOf(liftG, 0.42f * s)
+                        liftB = maxOf(liftB, 0.08f * s)
+                        gainR = maxOf(gainR, 1f + 0.35f * s)
+                    }
+                    TransitionType.LIGHT_LEAK -> {
+                        // Dreamy golden-peach lens flare bloom
+                        liftR = maxOf(liftR, 0.85f * s)
+                        liftG = maxOf(liftG, 0.66f * s)
+                        liftB = maxOf(liftB, 0.28f * s)
+                    }
+                    TransitionType.GLITCH -> {
+                        // Chromatic RGB pulse + stutter flash near the cut seam
+                        val osc = sin(phase * 42.0).toFloat()
+                        gainR *= (1f + 0.45f * s * osc).coerceIn(0.4f, 1.8f)
+                        gainB *= (1f - 0.45f * s * osc).coerceIn(0.4f, 1.8f)
+                        val flash = if (osc > 0.65f) 0.28f * s else 0f
+                        liftR = maxOf(liftR, flash)
+                        liftG = maxOf(liftG, flash * 0.5f)
+                        liftB = maxOf(liftB, flash * 1.1f)
+                    }
+                    TransitionType.DIRECTIONAL_BLUR, TransitionType.WHIP_PAN -> {
+                        // Subtle motion-blur exposure blend across the whip seam
+                        dimFactor = minOf(dimFactor, 1f - 0.35f * s)
                     }
                     else -> Unit
                 }
+            }
+
+            if (incomingDurUs > 0L && presentationTimeUs < incomingDurUs) {
+                val t = (presentationTimeUs.toFloat() / incomingDurUs.toFloat()).coerceIn(0f, 1f)
+                applySeamColor(incomingType, seamStrength = 1f - t, phase = t)
             }
 
             if (outgoingDurUs > 0L && clipDurationUs > 0L) {
                 val remaining = (clipDurationUs - presentationTimeUs).coerceAtLeast(0L)
                 if (remaining < outgoingDurUs) {
                     val t = (remaining.toFloat() / outgoingDurUs.toFloat()).coerceIn(0f, 1f)
-                    when (outgoingType) {
-                        TransitionType.CROSSFADE, TransitionType.DIP_TO_BLACK -> dimFactor = minOf(dimFactor, t)
-                        TransitionType.DIP_TO_WHITE -> {
-                            dimFactor = minOf(dimFactor, t)
-                            whiteLift = maxOf(whiteLift, 1f - t)
-                        }
-                        else -> Unit
-                    }
+                    applySeamColor(outgoingType, seamStrength = 1f - t, phase = 1f - t)
                 }
             }
 
-            if (dimFactor >= 0.999f && whiteLift <= 0.001f) return baseGl4x4
+            if (dimFactor >= 0.999f &&
+                liftR <= 0.001f && liftG <= 0.001f && liftB <= 0.001f &&
+                abs(gainR - 1f) <= 0.001f && abs(gainG - 1f) <= 0.001f && abs(gainB - 1f) <= 0.001f
+            ) {
+                return baseGl4x4
+            }
 
             val out = baseGl4x4.copyOf()
-            // Scale RGB columns (0..2, 4..6, 8..10) and translation (12..14)
-            for (i in listOf(0, 1, 2, 4, 5, 6, 8, 9, 10)) {
-                out[i] *= dimFactor
+            // Column-major 4x4: row 0 = R (0,4,8,12), row 1 = G (1,5,9,13), row 2 = B (2,6,10,14)
+            for (col in listOf(0, 4, 8)) {
+                out[col] *= dimFactor * gainR
+                out[col + 1] *= dimFactor * gainG
+                out[col + 2] *= dimFactor * gainB
             }
-            out[12] = out[12] * dimFactor + whiteLift
-            out[13] = out[13] * dimFactor + whiteLift
-            out[14] = out[14] * dimFactor + whiteLift
+            out[12] = (out[12] * dimFactor * gainR + liftR).coerceIn(-1f, 1.5f)
+            out[13] = (out[13] * dimFactor * gainG + liftG).coerceIn(-1f, 1.5f)
+            out[14] = (out[14] * dimFactor * gainB + liftB).coerceIn(-1f, 1.5f)
             return out
         }
     }
@@ -722,6 +1074,88 @@ class Media3ExportEngine(private val context: Context) {
             super.release()
             cachedTypewriterBitmap?.let { if (!it.isRecycled && it !== baseBitmap) it.recycle() }
             cachedTypewriterBitmap = null
+        }
+    }
+
+    /**
+     * Burns timed karaoke [CaptionClip] subtitles into exported MP4 frames with active-word
+     * highlighting, Pop-In scale, and Slide-Up motion.
+     */
+    private class TimedCaptionBitmapOverlay(
+        private val context: Context,
+        private val caption: CaptionClip,
+        private val clipGlobalStartMs: Long,
+        private val exportWidth: Int,
+        private val availableFonts: List<StudioFont>
+    ) : BitmapOverlay() {
+
+        private val words: List<String> = caption.text.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        private var lastWordIdx: Int = Int.MIN_VALUE
+        private var cachedBitmap: Bitmap? = null
+
+        override fun getBitmap(presentationTimeUs: Long): Bitmap {
+            val globalTimeMs = clipGlobalStartMs + (presentationTimeUs / 1000L)
+            val targetWordIdx = if (caption.animationPreset == CaptionAnimationPreset.ACTIVE_WORD_HIGHLIGHT && words.isNotEmpty()) {
+                val frac = ((globalTimeMs - caption.startTimeMs).toFloat() / caption.durationMs.toFloat()).coerceIn(0f, 0.999f)
+                (frac * words.size).toInt().coerceIn(0, words.lastIndex)
+            } else {
+                -1
+            }
+
+            if (targetWordIdx != lastWordIdx || cachedBitmap == null || cachedBitmap?.isRecycled == true) {
+                cachedBitmap?.let { if (!it.isRecycled) it.recycle() }
+                cachedBitmap = OverlayBitmapRenderer.renderCaptionBitmap(
+                    context = context,
+                    caption = caption,
+                    exportWidth = exportWidth,
+                    availableFonts = availableFonts,
+                    activeWordIndex = targetWordIdx
+                )
+                lastWordIdx = targetWordIdx
+            }
+            return cachedBitmap ?: OverlayBitmapRenderer.createTransparentPlaceholder()
+        }
+
+        override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings {
+            val globalTimeMs = clipGlobalStartMs + (presentationTimeUs / 1000L)
+            if (globalTimeMs !in caption.startTimeMs..caption.endTimeMs) {
+                return OverlaySettings.Builder().setAlphaScale(0f).build()
+            }
+            val elapsedMs = (globalTimeMs - caption.startTimeMs).coerceAtLeast(0L)
+            val enterFrac = (elapsedMs / 220f).coerceIn(0f, 1f)
+            var alpha = 1f
+            var scale = 1f
+            var extraY = 0f
+
+            when (caption.animationPreset) {
+                CaptionAnimationPreset.POP_IN -> {
+                    val ease = 1f - (1f - enterFrac) * (1f - enterFrac)
+                    scale = 0.72f + 0.28f * ease
+                    alpha = enterFrac
+                }
+                CaptionAnimationPreset.SLIDE_UP -> {
+                    val ease = 1f - (1f - enterFrac) * (1f - enterFrac)
+                    extraY = (1f - ease) * 0.06f
+                    alpha = enterFrac
+                }
+                else -> Unit
+            }
+
+            val ndcX = (caption.offsetX * 2f).coerceIn(-1.6f, 1.6f)
+            val ndcY = (-(caption.offsetY + extraY) * 2f).coerceIn(-1.8f, 1.8f)
+
+            return OverlaySettings.Builder()
+                .setAlphaScale(alpha.coerceIn(0f, 1f))
+                .setOverlayFrameAnchor(0f, 0f)
+                .setBackgroundFrameAnchor(ndcX, ndcY)
+                .setScale(scale, scale)
+                .build()
+        }
+
+        override fun release() {
+            super.release()
+            cachedBitmap?.let { if (!it.isRecycled) it.recycle() }
+            cachedBitmap = null
         }
     }
 

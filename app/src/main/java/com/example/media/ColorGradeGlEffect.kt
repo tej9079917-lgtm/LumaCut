@@ -123,6 +123,9 @@ private class ColorGradeShaderProgram(
             glProgram.setFloatsUniform("uCurvePts", curvePts)
             glProgram.setFloatUniform("uLutSize", lutSize)
             glProgram.setFloatUniform("uLutIntensity", adjustments.cubeLutIntensity.coerceIn(0f, 1f))
+            glProgram.setFloatUniform("uFilmGrain", adjustments.filmGrain.coerceIn(0f, 1f))
+            glProgram.setFloatUniform("uHalation", adjustments.halation.coerceIn(0f, 1f))
+            glProgram.setFloatUniform("uTimeSeed", ((presentationTimeUs / 33_333L) % 997L).toFloat() * 0.017f)
             glProgram.bindAttributesAndUniforms()
 
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -170,7 +173,14 @@ private class ColorGradeShaderProgram(
             uniform float uCurvePts[5];
             uniform float uLutSize;
             uniform float uLutIntensity;
+            uniform float uFilmGrain;
+            uniform float uHalation;
+            uniform float uTimeSeed;
             varying vec2 vTexSamplingCoord;
+
+            float hashGrain(vec2 co) {
+                return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453);
+            }
 
             float evalCurve(float x) {
                 float cx = clamp(x, 0.0, 1.0) * 4.0;
@@ -220,6 +230,19 @@ private class ColorGradeShaderProgram(
                 if (uLutSize > 1.5 && uLutIntensity > 0.005) {
                     vec3 lutColor = sampleCubeLut(rgb, uLutSize);
                     rgb = mix(rgb, lutColor, uLutIntensity);
+                }
+
+                // Warm analog highlight halation bloom
+                if (uHalation > 0.005) {
+                    float hiLuma = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+                    float bloom = smoothstep(0.62, 1.0, hiLuma) * uHalation;
+                    rgb += vec3(bloom * 0.34, bloom * 0.14, bloom * 0.03);
+                }
+
+                // Procedural 35mm analog film grain
+                if (uFilmGrain > 0.005) {
+                    float n = hashGrain(vTexSamplingCoord * 512.0 + vec2(uTimeSeed, uTimeSeed * 1.7)) - 0.5;
+                    rgb += vec3(n * uFilmGrain * 0.18);
                 }
 
                 gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), src.a);

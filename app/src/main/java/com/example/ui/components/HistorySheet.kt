@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Animation
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.CropFree
@@ -70,6 +71,7 @@ import com.example.ui.theme.InspectorCharcoal
 import com.example.ui.theme.SilverMuted
 import com.example.ui.theme.SlateDim
 import com.example.ui.theme.TrackAudioRose
+import com.example.ui.theme.TrackFxViolet
 import com.example.ui.theme.TrackOverlayEmerald
 import com.example.ui.theme.TrackVideoBlue
 
@@ -314,6 +316,7 @@ private fun CommandCategory.icon(): ImageVector = when (this) {
     CommandCategory.CUTOUT -> Icons.Default.AutoFixHigh
     CommandCategory.MASK -> Icons.Default.CropFree
     CommandCategory.CAPTIONS -> Icons.Default.Subtitles
+    CommandCategory.FX -> Icons.Default.BlurOn
 }
 
 private fun CommandCategory.accentColor(): Color = when (this) {
@@ -332,4 +335,5 @@ private fun CommandCategory.accentColor(): Color = when (this) {
     CommandCategory.CUTOUT -> TrackOverlayEmerald
     CommandCategory.MASK -> TrackVideoBlue
     CommandCategory.CAPTIONS -> CinemaAmber
+    CommandCategory.FX -> TrackFxViolet
 }

@@ -79,6 +79,32 @@ enum class SafeZoneOverlay(val label: String) {
     SHORTS("Shorts")
 }
 
+enum class CanvasBackdropMode(val displayName: String) {
+    SOLID_OBSIDIAN("Obsidian"),
+    BLURRED_VIDEO("Blur Fill"),
+    GRADIENT("Gradient")
+}
+
+enum class CanvasGradientPreset(
+    val displayName: String,
+    val startArgb: Long,
+    val endArgb: Long
+) {
+    MIDNIGHT_EMBER("Midnight Ember", 0xFF1F122B, 0xFF0A0C10),
+    STUDIO_TEAL("Studio Teal", 0xFF0B3B49, 0xFF09131B),
+    SUNSET_GOLD("Sunset Gold", 0xFF5A2A0C, 0xFF160B18),
+    VELVET_DUSK("Velvet Dusk", 0xFF2B133D, 0xFF0F172A),
+    POLAR_ICE("Polar Ice", 0xFF112A46, 0xFF0A141F),
+    CARBON_MESH("Carbon", 0xFF262B36, 0xFF0C0E12)
+}
+
+@JsonClass(generateAdapter = true)
+data class CanvasBackdrop(
+    val mode: CanvasBackdropMode = CanvasBackdropMode.SOLID_OBSIDIAN,
+    val gradientPreset: CanvasGradientPreset = CanvasGradientPreset.MIDNIGHT_EMBER,
+    val blurStrength: Float = 0.7f
+)
+
 enum class CutoutBackgroundMode(val displayName: String) {
     TRANSPARENT("Transparent"),
     SOLID_COLOR("Solid Color"),
@@ -330,6 +356,92 @@ data class TransitionSpec(
     val durationMs: Long = 600L
 )
 
+enum class VoiceEffectPreset(
+    val displayName: String,
+    val pitchFactor: Float,
+    val subtitle: String
+) {
+    NONE("Normal", 1.0f, "Natural voice"),
+    CHIPMUNK("Chipmunk", 1.55f, "High & bright"),
+    DEEP_BASS("Deep Bass", 0.72f, "Rich baritone"),
+    ROBOT("Robot", 1.0f, "Metallic ring-mod"),
+    RADIO("Radio", 1.0f, "Walkie-talkie"),
+    ECHO_HALL("Echo Hall", 1.0f, "Studio hall delay"),
+    MONSTER("Monster", 0.58f, "Ultra-deep growl"),
+    STUDIO_CLARITY("Broadcast", 1.02f, "Warm studio mic")
+}
+
+enum class FxType(val displayName: String, val badge: String) {
+    MAGNIFIER("Magnifier", "Zoom Lens"),
+    MOSAIC("Mosaic", "Pixelate"),
+    BLUR("Blur", "Gaussian")
+}
+
+enum class FxShape(val displayName: String) {
+    CIRCLE("Circle"),
+    ROUNDED_RECT("Rectangle")
+}
+
+@JsonClass(generateAdapter = true)
+data class FxLayer(
+    val id: String = UUID.randomUUID().toString(),
+    val type: FxType = FxType.BLUR,
+    val startTimeMs: Long = 0L,
+    val durationMs: Long = 4000L,
+    val fullFrame: Boolean = false,
+    val shape: FxShape = FxShape.CIRCLE,
+    val centerX: Float = 0.5f,          // Normalized 0.05..0.95
+    val centerY: Float = 0.5f,          // Normalized 0.05..0.95
+    val width: Float = 0.38f,           // Normalized 0.12..0.95
+    val height: Float = 0.38f,          // Normalized 0.12..0.95
+    val intensity: Float = 0.55f,       // 0.05..1.0 (blur strength or mosaic block size)
+    val magnification: Float = 2.0f,    // 1.2..4.0 (used by MAGNIFIER)
+    val feather: Float = 0.06f,         // 0.0..0.30 soft edge blend
+    val opacity: Float = 1f,            // 0.1..1.0
+    val showBorderRing: Boolean = true  // Crisp lens rim on MAGNIFIER
+) {
+    val endTimeMs: Long
+        get() = startTimeMs + durationMs.coerceAtLeast(300L)
+}
+
+@JsonClass(generateAdapter = true)
+data class CropRect(
+    val left: Float = 0f,               // 0f..0.45f
+    val top: Float = 0f,                // 0f..0.45f
+    val right: Float = 0f,              // 0f..0.45f
+    val bottom: Float = 0f,             // 0f..0.45f
+    val aspectPreset: String = "Free"
+) {
+    val isActive: Boolean
+        get() = left > 0.002f || top > 0.002f || right > 0.002f || bottom > 0.002f
+
+    val visibleWidthFraction: Float
+        get() = (1f - left.coerceIn(0f, 0.45f) - right.coerceIn(0f, 0.45f)).coerceAtLeast(0.1f)
+
+    val visibleHeightFraction: Float
+        get() = (1f - top.coerceIn(0f, 0.45f) - bottom.coerceIn(0f, 0.45f)).coerceAtLeast(0.1f)
+
+    fun sanitized(): CropRect {
+        val l = left.coerceIn(0f, 0.45f)
+        val r = right.coerceIn(0f, (0.90f - l).coerceAtLeast(0f))
+        val t = top.coerceIn(0f, 0.45f)
+        val b = bottom.coerceIn(0f, (0.90f - t).coerceAtLeast(0f))
+        return copy(left = l, top = t, right = r, bottom = b)
+    }
+}
+
+@JsonClass(generateAdapter = true)
+data class PanZoomSpec(
+    val enabled: Boolean = false,
+    val startScale: Float = 1f,         // 0.5..3.5
+    val startOffsetX: Float = 0f,       // -0.6..0.6
+    val startOffsetY: Float = 0f,       // -0.6..0.6
+    val endScale: Float = 1.25f,        // 0.5..3.5
+    val endOffsetX: Float = 0f,         // -0.6..0.6
+    val endOffsetY: Float = 0f,         // -0.6..0.6
+    val linked: Boolean = false         // When true, start and end framing stay locked together
+)
+
 @JsonClass(generateAdapter = true)
 data class AudioSettings(
     val volume: Float = 1f,       // 0f .. 2f
@@ -342,13 +454,19 @@ data class AudioSettings(
     val eqHighDb: Float = 0f,     // -12f .. +12f dB (6 kHz shelf)
     val voiceIsolation: Boolean = false,  // 85 Hz HPF + vocal presence + compressor
     val noiseGateDb: Float = -60f,        // -60 dB (Off) .. -12 dB
-    val autoDuckMusic: Boolean = false    // Duck background music when voice tracks peak
+    val autoDuckMusic: Boolean = false,   // Duck background music when voice tracks peak
+    val denoiseStrength: Float = 0f,      // 0f .. 1f broadband spectral & rumble denoise
+    val voiceEffect: VoiceEffectPreset = VoiceEffectPreset.NONE
 ) {
     val hasActiveEq: Boolean
         get() = abs(eqLowDb) > 0.1f || abs(eqMidDb) > 0.1f || abs(eqHighDb) > 0.1f
 
     val hasActiveDsp: Boolean
-        get() = hasActiveEq || voiceIsolation || noiseGateDb > -58f
+        get() = hasActiveEq ||
+            voiceIsolation ||
+            noiseGateDb > -58f ||
+            denoiseStrength > 0.02f ||
+            voiceEffect != VoiceEffectPreset.NONE
 }
 
 enum class KeyframeEasing(val displayName: String) {
@@ -362,16 +480,24 @@ enum class KeyframeEasing(val displayName: String) {
 data class ClipTransform(
     val offsetX: Float = 0f,          // Normalized -1.0 .. 1.0 of stage width
     val offsetY: Float = 0f,          // Normalized -1.0 .. 1.0 of stage height
-    val scale: Float = 1f,            // 0.25 .. 3.0
+    val scale: Float = 1f,            // 0.25 .. 4.0
     val rotationDegrees: Float = 0f,  // -180 .. 180
-    val opacity: Float = 1f           // 0.0 .. 1.0
+    val opacity: Float = 1f,          // 0.0 .. 1.0
+    val flipHorizontal: Boolean = false,
+    val flipVertical: Boolean = false,
+    val fullFrameFill: Boolean = false,
+    val crop: CropRect = CropRect()
 ) {
     val isIdentity: Boolean
         get() = abs(offsetX) < 0.002f &&
             abs(offsetY) < 0.002f &&
             abs(scale - 1f) < 0.005f &&
             abs(rotationDegrees) < 0.2f &&
-            abs(opacity - 1f) < 0.005f
+            abs(opacity - 1f) < 0.005f &&
+            !flipHorizontal &&
+            !flipVertical &&
+            !fullFrameFill &&
+            !crop.isActive
 }
 
 @JsonClass(generateAdapter = true)
@@ -415,6 +541,7 @@ data class MainClip(
     val opticalFlowSlowMo: Boolean = false,
     val baseTransform: ClipTransform = ClipTransform(),
     val keyframes: List<TransformKeyframe> = emptyList(),
+    val panZoom: PanZoomSpec = PanZoomSpec(),
     val aiCutout: AiCutoutSettings = AiCutoutSettings(),
     val mask: MaskSettings = MaskSettings()
 ) {
@@ -431,7 +558,8 @@ data class MainClip(
         get() {
             val semitoneFactor = 2.0.pow(pitchShiftSemitones.coerceIn(-12f, 12f) / 12.0).toFloat()
             val basePitch = if (preservePitch) 1.0f else safeSpeed
-            return (basePitch * semitoneFactor).coerceIn(0.25f, 4.0f)
+            val voicePitch = audio.voiceEffect.pitchFactor
+            return (basePitch * semitoneFactor * voicePitch).coerceIn(0.25f, 4.0f)
         }
 }
 
@@ -468,7 +596,11 @@ data class OverlayLayer(
     val textMotionDurationMs: Long = 900L,
     val aiCutout: AiCutoutSettings = AiCutoutSettings(),
     val mask: MaskSettings = MaskSettings(),
-    val motionTrack: MotionTrackData = MotionTrackData()
+    val motionTrack: MotionTrackData = MotionTrackData(),
+    val flipHorizontal: Boolean = false,
+    val flipVertical: Boolean = false,
+    val fullFrameFill: Boolean = false,
+    val crop: CropRect = CropRect()
 ) {
     val endTimeMs: Long
         get() = startTimeMs + durationMs.coerceAtLeast(300L)
@@ -523,7 +655,10 @@ data class TimelineDocument(
     val mainClips: List<MainClip> = emptyList(),
     val overlays: List<OverlayLayer> = emptyList(),
     val audioClips: List<AudioClip> = emptyList(),
-    val captions: List<CaptionClip> = emptyList()
+    val captions: List<CaptionClip> = emptyList(),
+    val fxLayers: List<FxLayer> = emptyList(),
+    val canvasBackdrop: CanvasBackdrop = CanvasBackdrop(),
+    val safeZoneOverlay: SafeZoneOverlay = SafeZoneOverlay.NONE
 ) {
     fun mainClipRanges(): List<ClipTimeRange> {
         var cursor = 0L
@@ -544,7 +679,8 @@ data class TimelineDocument(
             val overlayEnd = overlays.maxOfOrNull { it.endTimeMs } ?: 0L
             val audioEnd = audioClips.maxOfOrNull { it.endTimeMs } ?: 0L
             val captionEnd = captions.maxOfOrNull { it.endTimeMs } ?: 0L
-            return maxOf(mainEnd, overlayEnd, audioEnd, captionEnd)
+            val fxEnd = fxLayers.maxOfOrNull { it.endTimeMs } ?: 0L
+            return maxOf(mainEnd, overlayEnd, audioEnd, captionEnd, fxEnd)
         }
 
     fun mainClipAt(timeMs: Long): ClipTimeRange? {
@@ -581,6 +717,11 @@ data class TimelineDocument(
 
     fun activeCaptionsAt(timeMs: Long): List<CaptionClip> =
         captions
+            .filter { timeMs in it.startTimeMs..it.endTimeMs }
+            .sortedBy { it.startTimeMs }
+
+    fun activeFxLayersAt(timeMs: Long): List<FxLayer> =
+        fxLayers
             .filter { timeMs in it.startTimeMs..it.endTimeMs }
             .sortedBy { it.startTimeMs }
 }

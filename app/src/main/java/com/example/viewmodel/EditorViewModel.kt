@@ -7,32 +7,45 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.util.UnstableApi
+import com.example.ai.AiCreativeIdeasResult
+import com.example.ai.GeminiColoristService
 import com.example.data.StudioRepository
 import com.example.history.AddAudioClipCommand
+import com.example.history.AddCaptionsCommand
+import com.example.history.AddFxLayerCommand
 import com.example.history.AddMainClipsCommand
 import com.example.history.AddOverlayCommand
 import com.example.history.AspectRatioCommand
 import com.example.history.AudioSettingsCommand
 import com.example.history.BatchTransitionChangeCommand
+import com.example.history.CanvasBackdropCommand
 import com.example.history.ClipKeyframesCommand
 import com.example.history.ClipSpeedCommand
 import com.example.history.ClipSpeedSnapshot
 import com.example.history.ColorGradeCommand
 import com.example.history.CommandCategory
 import com.example.history.DeleteAudioClipCommand
+import com.example.history.DeleteCaptionCommand
+import com.example.history.DeleteFxLayerCommand
 import com.example.history.DeleteMainClipCommand
 import com.example.history.DeleteOverlayCommand
 import com.example.history.DuplicateMainClipCommand
 import com.example.history.EditCommand
 import com.example.history.EditHistoryManager
 import com.example.history.EditorDocumentState
+import com.example.history.ExtractAudioCommand
 import com.example.history.FilterChangeCommand
 import com.example.history.HistorySnapshotUi
+import com.example.history.MainClipCutoutCommand
+import com.example.history.MainClipMaskCommand
+import com.example.history.MainClipPanZoomCommand
 import com.example.history.OverlayPropertyCommand
 import com.example.history.OverlayTransformSnapshot
 import com.example.history.ProjectTitleCommand
 import com.example.history.ReorderMainClipCommand
 import com.example.history.ReorderOverlayZCommand
+import com.example.history.ReplaceMainClipsCommand
+import com.example.history.SafeZoneOverlayCommand
 import com.example.history.SplitAudioClipCommand
 import com.example.history.SplitMainClipCommand
 import com.example.history.SplitOverlayCommand
@@ -41,25 +54,49 @@ import com.example.history.TransitionChangeCommand
 import com.example.history.TrimAudioClipCommand
 import com.example.history.TrimMainClipCommand
 import com.example.history.TrimOverlayTimingCommand
+import com.example.history.UpdateCaptionCommand
+import com.example.history.UpdateFxLayerCommand
+import com.example.media.AudioClipExtractor
+import com.example.media.AudioWaveformExtractor
+import com.example.media.CinemaSfxPreset
 import com.example.media.FontResolver
 import com.example.media.Media3ExportEngine
+import com.example.media.OfflineSpeechCaptionEngine
+import com.example.media.SpeedRampPreset
+import com.example.media.SrtCodec
+import com.example.media.StudioCreativeTools
 import com.example.media.VoiceoverRecorder
+import com.example.model.AiCutoutSettings
 import com.example.model.AspectRatio
 import com.example.model.AudioClip
 import com.example.model.AudioSettings
+import com.example.model.CanvasBackdrop
+import com.example.model.CaptionAnimationPreset
+import com.example.model.CaptionClip
 import com.example.model.ClipTransform
 import com.example.model.ColorAdjustments
+import com.example.model.CropRect
+import com.example.model.CutoutBackgroundMode
 import com.example.model.ExportConfig
 import com.example.model.ExportState
 import com.example.model.FilterPreset
+import com.example.model.FxLayer
+import com.example.model.FxShape
+import com.example.model.FxType
 import com.example.model.KeyframeEasing
 import com.example.model.KeyframeEvaluator
+import com.example.model.LowerThirdTemplate
 import com.example.model.MainClip
 import com.example.model.MainMediaType
+import com.example.model.MaskKeyframe
+import com.example.model.MaskSettings
 import com.example.model.OverlayBlendMode
 import com.example.model.OverlayLayer
 import com.example.model.OverlayType
+import com.example.model.PanZoomSpec
+import com.example.model.SafeZoneOverlay
 import com.example.model.StudioFont
+import com.example.model.TextMotionPreset
 import com.example.model.TimelineDocument
 import com.example.model.TransformKeyframe
 import com.example.model.TransitionSpec
@@ -67,6 +104,9 @@ import com.example.model.TransitionType
 import com.example.model.formatTimecode
 import com.example.ui.components.MotionPreset
 import com.example.ui.components.VideoScopeMode
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -90,6 +130,8 @@ sealed interface SelectedItem {
     data class OverlayItem(val overlayId: String) : SelectedItem
     data class AudioItem(val audioId: String) : SelectedItem
     data class TransitionItem(val afterClipId: String) : SelectedItem
+    data class CaptionItem(val captionId: String) : SelectedItem
+    data class FxItem(val fxId: String) : SelectedItem
 }
 
 enum class InspectorTab {
@@ -100,6 +142,13 @@ enum class InspectorTab {
     TRANSITION,
     KEYFRAMES,
     SPEED,
+    MASK,
+    VISUAL_FX,
+    TRANSFORM_CROP,
+    CUTOUT,
+    CAPTIONS,
+    TEMPLATES,
+    AI_STUDIO,
     TEXT_STYLE,
     IMAGE_OVERLAY,
     VIDEO_OVERLAY,
@@ -114,8 +163,10 @@ data class EditorUiState(
     val aspectRatio: AspectRatio = AspectRatio.PORTRAIT_9_16,
     val timeline: TimelineDocument = TimelineDocument(),
     val playheadMs: Long = 0L,
+    val seekNonce: Long = 0L,
     val isPlaying: Boolean = false,
     val timelineZoom: Float = 1f,
+    val isTimelineExpanded: Boolean = false,
     val selection: SelectedItem = SelectedItem.None,
     val activeInspector: InspectorTab = InspectorTab.NONE,
     val history: HistorySnapshotUi = HistorySnapshotUi(),
@@ -133,7 +184,20 @@ data class EditorUiState(
     val voiceoverElapsedMs: Long = 0L,
     val showExportSheet: Boolean = false,
     val exportConfig: ExportConfig = ExportConfig(),
-    val exportState: ExportState = ExportState.Idle
+    val exportState: ExportState = ExportState.Idle,
+    val aiIdeasLoading: Boolean = false,
+    val aiIdeasResult: AiCreativeIdeasResult? = null,
+    val aiIdeasError: String? = null,
+    val aiColoristLoading: Boolean = false,
+    val aiColoristNote: String? = null,
+    val aiColoristError: String? = null,
+    val aiCaptionsLoading: Boolean = false,
+    val aiCaptionsError: String? = null,
+    val autoCaptionLoading: Boolean = false,
+    val autoCaptionStatus: String? = null,
+    val autoCaptionError: String? = null,
+    val isLiveMicDictating: Boolean = false,
+    val liveMicPartialText: String = ""
 ) {
     val canUndo: Boolean get() = history.canUndo
     val canRedo: Boolean get() = history.canRedo
@@ -158,6 +222,16 @@ data class EditorUiState(
             timeline.mainClips.firstOrNull { it.id == sel.afterClipId }
         }
 
+    val selectedCaption: CaptionClip?
+        get() = (selection as? SelectedItem.CaptionItem)?.let { sel ->
+            timeline.captions.firstOrNull { it.id == sel.captionId }
+        }
+
+    val selectedFxLayer: FxLayer?
+        get() = (selection as? SelectedItem.FxItem)?.let { sel ->
+            timeline.fxLayers.firstOrNull { it.id == sel.fxId }
+        }
+
     fun toDocumentState(): EditorDocumentState = EditorDocumentState(
         projectTitle = projectTitle,
         aspectRatio = aspectRatio,
@@ -172,8 +246,10 @@ class EditorViewModel(
     private val repository: StudioRepository
 ) : ViewModel() {
 
-    private val exportEngine = Media3ExportEngine(appContext.applicationContext)
-    private val voiceoverRecorder = VoiceoverRecorder(appContext.applicationContext)
+    private val appContext: Context = appContext.applicationContext
+    private val exportEngine = Media3ExportEngine(this.appContext)
+    private val voiceoverRecorder = VoiceoverRecorder(this.appContext)
+    private val offlineSpeechEngine = OfflineSpeechCaptionEngine(this.appContext)
     private val historyManager = EditHistoryManager(maxCapacity = 60, coalesceWindowMs = 900L)
 
     private val _uiState = MutableStateFlow(EditorUiState(projectId = projectId))
@@ -335,6 +411,10 @@ class EditorViewModel(
                 if (timeline.audioClips.any { it.id == selection.audioId }) selection else SelectedItem.None
             is SelectedItem.TransitionItem ->
                 if (timeline.mainClips.any { it.id == selection.afterClipId }) selection else SelectedItem.None
+            is SelectedItem.CaptionItem ->
+                if (timeline.captions.any { it.id == selection.captionId }) selection else SelectedItem.None
+            is SelectedItem.FxItem ->
+                if (timeline.fxLayers.any { it.id == selection.fxId }) selection else SelectedItem.None
             SelectedItem.None -> SelectedItem.None
         }
 
@@ -350,8 +430,15 @@ class EditorViewModel(
         if (state.isPlaying) {
             pausePlayback()
         } else {
-            val startFrom = if (state.playheadMs >= total - 50L) 0L else state.playheadMs
-            _uiState.update { it.copy(isPlaying = true, playheadMs = startFrom) }
+            val wrapped = state.playheadMs >= total - 50L
+            val startFrom = if (wrapped) 0L else state.playheadMs
+            _uiState.update {
+                it.copy(
+                    isPlaying = true,
+                    playheadMs = startFrom,
+                    seekNonce = if (wrapped) it.seekNonce + 1L else it.seekNonce
+                )
+            }
             startPlaybackTicker()
         }
     }
@@ -365,10 +452,10 @@ class EditorViewModel(
     private fun startPlaybackTicker() {
         playbackJob?.cancel()
         playbackJob = viewModelScope.launch {
-            var lastWallMs = System.currentTimeMillis()
+            var lastWallMs = android.os.SystemClock.elapsedRealtime()
             while (isActive && _uiState.value.isPlaying) {
                 delay(16L)
-                val now = System.currentTimeMillis()
+                val now = android.os.SystemClock.elapsedRealtime()
                 val delta = (now - lastWallMs).coerceIn(1L, 80L)
                 lastWallMs = now
                 val total = _uiState.value.timeline.totalDurationMs
@@ -389,7 +476,20 @@ class EditorViewModel(
 
     fun seekTo(ms: Long) {
         val total = _uiState.value.timeline.totalDurationMs.coerceAtLeast(0L)
-        _uiState.update { it.copy(playheadMs = ms.coerceIn(0L, total)) }
+        val clamped = ms.coerceIn(0L, total)
+        _uiState.update {
+            it.copy(
+                playheadMs = clamped,
+                seekNonce = it.seekNonce + 1L
+            )
+        }
+    }
+
+    fun scrubTo(ms: Long) {
+        if (_uiState.value.isPlaying) {
+            pausePlayback()
+        }
+        seekTo(ms)
     }
 
     fun stepFrame(deltaMs: Long) {
@@ -426,6 +526,10 @@ class EditorViewModel(
         _uiState.update { it.copy(timelineZoom = zoom.coerceIn(0.45f, 3.0f)) }
     }
 
+    fun toggleTimelineExpanded() {
+        _uiState.update { it.copy(isTimelineExpanded = !it.isTimelineExpanded) }
+    }
+
     // --- Selection & Inspector ---
 
     fun selectItem(selection: SelectedItem, openInspector: InspectorTab? = null) {
@@ -433,6 +537,8 @@ class EditorViewModel(
         _uiState.update { current ->
             val resolvedInspector = openInspector ?: when (selection) {
                 is SelectedItem.TransitionItem -> InspectorTab.TRANSITION
+                is SelectedItem.CaptionItem -> InspectorTab.CAPTIONS
+                is SelectedItem.FxItem -> InspectorTab.VISUAL_FX
                 is SelectedItem.AudioItem -> if (current.activeInspector == InspectorTab.AUDIO) InspectorTab.AUDIO else InspectorTab.NONE
                 is SelectedItem.OverlayItem -> {
                     val overlay = current.timeline.overlays.firstOrNull { it.id == selection.overlayId }
@@ -459,7 +565,10 @@ class EditorViewModel(
                     InspectorTab.ADJUST,
                     InspectorTab.AUDIO,
                     InspectorTab.KEYFRAMES,
-                    InspectorTab.SPEED
+                    InspectorTab.SPEED,
+                    InspectorTab.MASK,
+                    InspectorTab.TRANSFORM_CROP,
+                    InspectorTab.CUTOUT
                 )
             ) {
                 val underPlayhead = current.timeline.mainClipAt(current.playheadMs)
@@ -1156,6 +1265,20 @@ class EditorViewModel(
                 )
                 _feedback.tryEmit("Duplicated audio clip")
             }
+            is SelectedItem.FxItem -> {
+                val fx = _uiState.value.timeline.fxLayers.firstOrNull { it.id == sel.fxId } ?: return
+                val dup = fx.copy(
+                    id = UUID.randomUUID().toString(),
+                    centerX = (fx.centerX + 0.06f).coerceIn(0.15f, 0.85f),
+                    centerY = (fx.centerY + 0.06f).coerceIn(0.15f, 0.85f)
+                )
+                dispatchCommand(
+                    command = AddFxLayerCommand(dup, "Duplicate ${fx.type.displayName} FX"),
+                    newSelection = SelectedItem.FxItem(dup.id),
+                    newInspector = InspectorTab.VISUAL_FX
+                )
+                _feedback.tryEmit("Duplicated ${fx.type.displayName} FX")
+            }
             else -> Unit
         }
     }
@@ -1195,6 +1318,24 @@ class EditorViewModel(
                     newInspector = InspectorTab.NONE
                 )
                 _feedback.tryEmit("Removed audio track")
+            }
+            is SelectedItem.CaptionItem -> {
+                val caption = _uiState.value.timeline.captions.firstOrNull { it.id == sel.captionId } ?: return
+                dispatchCommand(
+                    command = DeleteCaptionCommand(caption),
+                    newSelection = SelectedItem.None,
+                    newInspector = InspectorTab.CAPTIONS
+                )
+                _feedback.tryEmit("Removed caption")
+            }
+            is SelectedItem.FxItem -> {
+                val fx = _uiState.value.timeline.fxLayers.firstOrNull { it.id == sel.fxId } ?: return
+                dispatchCommand(
+                    command = DeleteFxLayerCommand(fx),
+                    newSelection = SelectedItem.None,
+                    newInspector = InspectorTab.VISUAL_FX
+                )
+                _feedback.tryEmit("Removed ${fx.type.displayName} FX")
             }
             else -> Unit
         }
@@ -1265,13 +1406,14 @@ class EditorViewModel(
 
         var snapX = false
         var snapY = false
-        var nextX = (beforeLayer.offsetX + deltaNormalizedX).coerceIn(-0.48f, 0.48f)
-        var nextY = (beforeLayer.offsetY + deltaNormalizedY).coerceIn(-0.48f, 0.48f)
-        if (abs(nextX) < 0.022f) {
+        // Free placement allowing partial off-screen framing up to ±95% of stage dimensions
+        var nextX = (beforeLayer.offsetX + deltaNormalizedX).coerceIn(-0.95f, 0.95f)
+        var nextY = (beforeLayer.offsetY + deltaNormalizedY).coerceIn(-0.95f, 0.95f)
+        if (abs(nextX) < 0.018f && abs(deltaNormalizedX) > 0.0002f) {
             nextX = 0f
             snapX = true
         }
-        if (abs(nextY) < 0.022f) {
+        if (abs(nextY) < 0.018f && abs(deltaNormalizedY) > 0.0002f) {
             nextY = 0f
             snapY = true
         }
@@ -1437,8 +1579,14 @@ class EditorViewModel(
         val state = _uiState.value
         val range = state.timeline.mainClipRanges().firstOrNull { it.clip.id == afterClipId } ?: return
         val halfDur = (range.clip.transitionToNext.durationMs / 2L).coerceAtLeast(250L)
-        val startMs = (range.endMs - halfDur - 250L).coerceAtLeast(0L)
-        _uiState.update { it.copy(playheadMs = startMs, isPlaying = true) }
+        val startMs = (range.endMs - halfDur - 350L).coerceAtLeast(0L)
+        _uiState.update {
+            it.copy(
+                playheadMs = startMs,
+                seekNonce = it.seekNonce + 1L,
+                isPlaying = true
+            )
+        }
         startPlaybackTicker()
     }
 
@@ -1833,6 +1981,578 @@ class EditorViewModel(
         }
     }
 
+    fun updateCanvasBackdrop(backdrop: CanvasBackdrop) {
+        val before = _uiState.value.timeline.canvasBackdrop
+        if (before == backdrop) return
+        dispatchCommand(CanvasBackdropCommand(before, backdrop))
+    }
+
+    fun updateSafeZoneOverlay(safeZone: SafeZoneOverlay) {
+        val before = _uiState.value.timeline.safeZoneOverlay
+        if (before == safeZone) return
+        if (dispatchCommand(SafeZoneOverlayCommand(before, safeZone))) {
+            _feedback.tryEmit("Safe Zone: ${safeZone.label}")
+        }
+    }
+
+    // --- Masking, Flip & 90° Rotate ---
+
+    fun updateSelectedMask(mask: MaskSettings) {
+        val sel = _uiState.value.selection
+        if (sel is SelectedItem.OverlayItem) {
+            val before = _uiState.value.timeline.overlays.firstOrNull { it.id == sel.overlayId } ?: return
+            if (before.mask == mask) return
+            dispatchCommand(
+                OverlayPropertyCommand(
+                    overlayId = sel.overlayId,
+                    before = before,
+                    after = before.copy(mask = mask),
+                    label = "Mask: ${mask.shape.displayName}"
+                )
+            )
+            return
+        }
+        val clipId = resolveTargetMainClipId() ?: return
+        val clip = _uiState.value.timeline.mainClips.firstOrNull { it.id == clipId } ?: return
+        if (clip.mask == mask) return
+        dispatchCommand(
+            MainClipMaskCommand(
+                clipId = clipId,
+                before = clip.mask,
+                after = mask,
+                label = "Mask: ${mask.shape.displayName}"
+            )
+        )
+    }
+
+    fun toggleSelectedMaskKeyframe() {
+        val clipId = resolveTargetMainClipId() ?: return
+        val range = _uiState.value.timeline.mainClipRanges().firstOrNull { it.clip.id == clipId } ?: return
+        val clip = range.clip
+        val localMs = (_uiState.value.playheadMs - range.startMs).coerceIn(0L, clip.durationMs)
+        val currentMask = clip.mask
+        val existingIdx = currentMask.keyframes.indexOfFirst { abs(it.timeOffsetMs - localMs) <= 120L }
+        val updatedKeys = if (existingIdx >= 0) {
+            currentMask.keyframes.toMutableList().apply { removeAt(existingIdx) }
+        } else {
+            (currentMask.keyframes + MaskKeyframe(
+                timeOffsetMs = localMs,
+                centerX = currentMask.centerX,
+                centerY = currentMask.centerY,
+                width = currentMask.width,
+                height = currentMask.height,
+                rotationDegrees = currentMask.rotationDegrees
+            )).sortedBy { it.timeOffsetMs }
+        }
+        updateSelectedMask(currentMask.copy(keyframes = updatedKeys))
+        _feedback.tryEmit(if (existingIdx >= 0) "Removed mask keyframe" else "Added mask keyframe")
+    }
+
+    fun toggleClipFlip(horizontal: Boolean) {
+        val clipId = resolveTargetMainClipId() ?: return
+        val clip = _uiState.value.timeline.mainClips.firstOrNull { it.id == clipId } ?: return
+        val before = clip.baseTransform
+        val after = if (horizontal) {
+            before.copy(flipHorizontal = !before.flipHorizontal)
+        } else {
+            before.copy(flipVertical = !before.flipVertical)
+        }
+        dispatchCommand(
+            ClipKeyframesCommand(
+                clipId = clipId,
+                beforeBaseTransform = before,
+                afterBaseTransform = after,
+                beforeKeyframes = clip.keyframes,
+                afterKeyframes = clip.keyframes,
+                label = if (horizontal) "Flip Horizontal" else "Flip Vertical",
+                mergeKey = null
+            )
+        )
+        _feedback.tryEmit(if (horizontal) "Flipped horizontally" else "Flipped vertically")
+    }
+
+    fun rotateClip90() {
+        val clipId = resolveTargetMainClipId() ?: return
+        val clip = _uiState.value.timeline.mainClips.firstOrNull { it.id == clipId } ?: return
+        val before = clip.baseTransform
+        val rawRot = (before.rotationDegrees + 90f) % 360f
+        val normalized = if (rawRot > 180f) rawRot - 360f else rawRot
+        val after = before.copy(rotationDegrees = normalized)
+        dispatchCommand(
+            ClipKeyframesCommand(
+                clipId = clipId,
+                beforeBaseTransform = before,
+                afterBaseTransform = after,
+                beforeKeyframes = clip.keyframes,
+                afterKeyframes = clip.keyframes,
+                label = "Rotate 90°",
+                mergeKey = null
+            )
+        )
+        _feedback.tryEmit("Rotated clip 90°")
+    }
+
+    // --- Freeze Frame & Speed Ramping ---
+
+    fun insertFreezeFrameAtPlayhead() {
+        pausePlayback()
+        val state = _uiState.value
+        val range = state.timeline.mainClipAt(state.playheadMs) ?: run {
+            _feedback.tryEmit("Move playhead over a video clip first")
+            return
+        }
+        val clip = range.clip
+        if (clip.mediaType != MainMediaType.VIDEO) {
+            _feedback.tryEmit("Freeze frame works on video clips")
+            return
+        }
+        val localMs = (state.playheadMs - range.startMs).coerceIn(0L, clip.durationMs)
+        val sourceTimeMs = (clip.trimStartMs + (localMs * clip.safeSpeed).toLong())
+            .coerceIn(clip.trimStartMs, clip.trimEndMs)
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isImporting = true) }
+            try {
+                val bmp = StudioCreativeTools.extractFrameBitmap(appContext, clip.uri, sourceTimeMs)
+                if (bmp == null) {
+                    _feedback.tryEmit("Could not decode frame at current timecode")
+                    return@launch
+                }
+                val file = StudioCreativeTools.saveFreezeFramePng(appContext, bmp)
+                bmp.recycle()
+
+                val freezeClip = MainClip(
+                    uri = Uri.fromFile(file).toString(),
+                    displayName = "${clip.displayName} (Freeze)",
+                    mediaType = MainMediaType.IMAGE,
+                    sourceDurationMs = 2000L,
+                    trimStartMs = 0L,
+                    trimEndMs = 2000L,
+                    filterPreset = clip.filterPreset,
+                    filterIntensity = clip.filterIntensity,
+                    colorAdjustments = clip.colorAdjustments,
+                    thumbnailPath = file.absolutePath,
+                    baseTransform = clip.baseTransform,
+                    mask = clip.mask
+                )
+
+                val beforeClips = _uiState.value.timeline.mainClips
+                val idx = beforeClips.indexOfFirst { it.id == clip.id }
+                if (idx < 0) return@launch
+
+                val newClips = beforeClips.toMutableList()
+                val canSplitBothSides = (sourceTimeMs - clip.trimStartMs >= 300L) && (clip.trimEndMs - sourceTimeMs >= 300L)
+                if (canSplitBothSides) {
+                    val left = clip.copy(
+                        trimEndMs = sourceTimeMs,
+                        transitionToNext = TransitionSpec()
+                    )
+                    val right = clip.copy(
+                        id = UUID.randomUUID().toString(),
+                        trimStartMs = sourceTimeMs,
+                        keyframes = emptyList()
+                    )
+                    newClips[idx] = left
+                    newClips.add(idx + 1, freezeClip)
+                    newClips.add(idx + 2, right)
+                } else {
+                    newClips.add(idx + 1, freezeClip)
+                }
+
+                dispatchCommand(
+                    command = ReplaceMainClipsCommand(
+                        beforeClips = beforeClips,
+                        afterClips = newClips,
+                        label = "Insert Freeze Frame",
+                        category = CommandCategory.CUT
+                    ),
+                    newSelection = SelectedItem.MainClipItem(freezeClip.id)
+                )
+                _feedback.tryEmit("Inserted 2.0s Freeze Frame")
+            } catch (e: Exception) {
+                _feedback.tryEmit(e.localizedMessage ?: "Freeze frame failed")
+            } finally {
+                _uiState.update { it.copy(isImporting = false) }
+            }
+        }
+    }
+
+    fun applySpeedRampPreset(preset: SpeedRampPreset) {
+        pausePlayback()
+        val clipId = resolveTargetMainClipId() ?: return
+        val beforeClips = _uiState.value.timeline.mainClips
+        val idx = beforeClips.indexOfFirst { it.id == clipId }
+        if (idx < 0) return
+        val target = beforeClips[idx]
+        if (target.mediaType != MainMediaType.VIDEO) {
+            _feedback.tryEmit("Speed ramps apply to video clips")
+            return
+        }
+        val segments = preset.splitClip(target)
+        val afterClips = beforeClips.toMutableList().apply {
+            removeAt(idx)
+            addAll(idx, segments)
+        }
+        dispatchCommand(
+            command = ReplaceMainClipsCommand(
+                beforeClips = beforeClips,
+                afterClips = afterClips,
+                label = "Speed Ramp: ${preset.displayName}",
+                category = CommandCategory.SPEED
+            ),
+            newSelection = SelectedItem.MainClipItem(segments.first().id)
+        )
+        _feedback.tryEmit("Applied ${preset.displayName} (${segments.size} segments)")
+    }
+
+    // --- Audio Pro: Extract Audio & Offline Cinema SFX ---
+
+    fun extractAudioFromSelectedClip() {
+        pausePlayback()
+        val clipId = resolveTargetMainClipId() ?: run {
+            _feedback.tryEmit("Select a video clip first")
+            return
+        }
+        val range = _uiState.value.timeline.mainClipRanges().firstOrNull { it.clip.id == clipId } ?: return
+        val clip = range.clip
+        if (clip.mediaType != MainMediaType.VIDEO) {
+            _feedback.tryEmit("Only video clips have embedded audio")
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isImporting = true) }
+            try {
+                val uri = Uri.parse(clip.uri)
+                val analysis = withContext(Dispatchers.IO) {
+                    AudioWaveformExtractor.extract(appContext, uri, clip.sourceDurationMs)
+                }
+                val lane = findOpenAudioLane(_uiState.value.timeline.audioClips, range.startMs)
+                val extracted = AudioClip(
+                    laneIndex = lane,
+                    displayName = "${clip.displayName} (Audio)",
+                    uri = clip.uri,
+                    startTimeMs = range.startMs,
+                    sourceDurationMs = clip.sourceDurationMs,
+                    trimStartMs = clip.trimStartMs,
+                    trimEndMs = clip.trimEndMs,
+                    audio = clip.audio.copy(isMuted = false),
+                    waveformPeaks = analysis.peaks,
+                    beatPositionsMs = analysis.beatPositionsMs
+                )
+                dispatchCommand(
+                    command = ExtractAudioCommand(
+                        sourceClipId = clip.id,
+                        beforeClipAudio = clip.audio,
+                        extractedAudioClip = extracted
+                    ),
+                    newSelection = SelectedItem.AudioItem(extracted.id),
+                    newInspector = InspectorTab.AUDIO
+                )
+                _feedback.tryEmit("Extracted audio to Track ${lane + 1}")
+            } catch (e: Exception) {
+                _feedback.tryEmit(e.localizedMessage ?: "Audio extraction failed")
+            } finally {
+                _uiState.update { it.copy(isImporting = false) }
+            }
+        }
+    }
+
+    fun previewCinemaSfx(preset: CinemaSfxPreset) {
+        viewModelScope.launch {
+            runCatching {
+                val file = StudioCreativeTools.ensureCinemaSfxFile(appContext, preset)
+                StudioCreativeTools.auditionWavFile(file)
+            }
+        }
+    }
+
+    fun insertCinemaSfxAtPlayhead(preset: CinemaSfxPreset) {
+        pausePlayback()
+        viewModelScope.launch {
+            try {
+                val file = StudioCreativeTools.ensureCinemaSfxFile(appContext, preset)
+                val uri = Uri.fromFile(file)
+                val analysis = withContext(Dispatchers.IO) {
+                    AudioWaveformExtractor.extract(appContext, uri, preset.durationMs)
+                }
+                val startMs = _uiState.value.playheadMs.coerceAtLeast(0L)
+                val lane = findOpenAudioLane(_uiState.value.timeline.audioClips, startMs)
+                val sfxClip = AudioClip(
+                    laneIndex = lane,
+                    displayName = "SFX • ${preset.displayName}",
+                    uri = uri.toString(),
+                    startTimeMs = startMs,
+                    sourceDurationMs = preset.durationMs,
+                    trimStartMs = 0L,
+                    trimEndMs = preset.durationMs,
+                    audio = AudioSettings(volume = 1.0f),
+                    waveformPeaks = analysis.peaks,
+                    beatPositionsMs = analysis.beatPositionsMs
+                )
+                dispatchCommand(
+                    command = AddAudioClipCommand(sfxClip, "Add SFX: ${preset.displayName}"),
+                    newSelection = SelectedItem.AudioItem(sfxClip.id)
+                )
+                StudioCreativeTools.auditionWavFile(file)
+                _feedback.tryEmit("Added ${preset.displayName} at ${formatTimecode(startMs)}")
+            } catch (e: Exception) {
+                _feedback.tryEmit(e.localizedMessage ?: "Could not insert SFX")
+            }
+        }
+    }
+
+    // --- Karaoke Captions & SRT Studio ---
+
+    fun addCaptionAtPlayhead(text: String = "Tap to edit caption") {
+        pausePlayback()
+        val start = _uiState.value.playheadMs.coerceAtLeast(0L)
+        val caption = CaptionClip(
+            text = text,
+            startTimeMs = start,
+            endTimeMs = start + 2400L,
+            animationPreset = CaptionAnimationPreset.ACTIVE_WORD_HIGHLIGHT
+        )
+        dispatchCommand(
+            command = AddCaptionsCommand(listOf(caption), "Add Caption"),
+            newSelection = SelectedItem.CaptionItem(caption.id),
+            newInspector = InspectorTab.CAPTIONS
+        )
+        _feedback.tryEmit("Added caption at ${formatTimecode(start)}")
+    }
+
+    fun updateSelectedCaption(transform: (CaptionClip) -> CaptionClip) {
+        val sel = _uiState.value.selection as? SelectedItem.CaptionItem ?: return
+        val before = _uiState.value.timeline.captions.firstOrNull { it.id == sel.captionId } ?: return
+        val after = transform(before)
+        if (after == before) return
+        dispatchCommand(UpdateCaptionCommand(before.id, before, after))
+    }
+
+    fun moveOrTrimCaption(captionId: String, newStartMs: Long, newEndMs: Long) {
+        val before = _uiState.value.timeline.captions.firstOrNull { it.id == captionId } ?: return
+        val clampedStart = newStartMs.coerceAtLeast(0L)
+        val clampedEnd = newEndMs.coerceAtLeast(clampedStart + 350L)
+        val after = before.copy(startTimeMs = clampedStart, endTimeMs = clampedEnd)
+        if (after == before) return
+        dispatchCommand(UpdateCaptionCommand(before.id, before, after, label = "Retiming Caption"))
+    }
+
+    fun importSrtFromUri(uri: Uri) {
+        pausePlayback()
+        viewModelScope.launch {
+            try {
+                val raw = withContext(Dispatchers.IO) {
+                    appContext.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                } ?: run {
+                    _feedback.tryEmit("Could not read selected .srt file")
+                    return@launch
+                }
+                val parsed = SrtCodec.parseSrt(raw)
+                if (parsed.isEmpty()) {
+                    _feedback.tryEmit("No valid subtitle cues found in .srt file")
+                    return@launch
+                }
+                dispatchCommand(
+                    command = AddCaptionsCommand(parsed, "Import SRT (${parsed.size} cues)"),
+                    newSelection = SelectedItem.CaptionItem(parsed.first().id),
+                    newInspector = InspectorTab.CAPTIONS
+                )
+                _feedback.tryEmit("Imported ${parsed.size} captions from SRT")
+            } catch (e: Exception) {
+                _feedback.tryEmit(e.localizedMessage ?: "SRT import failed")
+            }
+        }
+    }
+
+    fun exportSrtToUri(uri: Uri) {
+        val captions = _uiState.value.timeline.captions
+        if (captions.isEmpty()) {
+            _feedback.tryEmit("Add captions before exporting .srt")
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val srtText = SrtCodec.formatSrt(captions)
+                withContext(Dispatchers.IO) {
+                    appContext.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(srtText) }
+                        ?: error("Could not open output file")
+                }
+                _feedback.tryEmit("Exported ${captions.size} captions to .srt")
+            } catch (e: Exception) {
+                _feedback.tryEmit(e.localizedMessage ?: "SRT export failed")
+            }
+        }
+    }
+
+    // --- Animated Lower Third Templates ---
+
+    fun insertLowerThirdTemplate(template: LowerThirdTemplate) {
+        pausePlayback()
+        val state = _uiState.value
+        val nextZ = (state.timeline.overlays.maxOfOrNull { it.zIndex } ?: 0) + 1
+        val overlay = template.toOverlayLayer(startTimeMs = state.playheadMs.coerceAtLeast(0L), zIndex = nextZ)
+        dispatchCommand(
+            command = AddOverlayCommand(overlay, "Add ${template.displayName}"),
+            newSelection = SelectedItem.OverlayItem(overlay.id),
+            newInspector = InspectorTab.TEXT_STYLE
+        )
+        _feedback.tryEmit("Inserted ${template.displayName}")
+    }
+
+    // --- Gemini AI Creative Studio (Firebase AI Logic + App Check) ---
+
+    private suspend fun captureCurrentPlayheadFrame(): android.graphics.Bitmap? {
+        val state = _uiState.value
+        val range = state.timeline.mainClipAt(state.playheadMs) ?: return null
+        val clip = range.clip
+        return if (clip.mediaType == MainMediaType.VIDEO) {
+            val localMs = (state.playheadMs - range.startMs).coerceIn(0L, clip.durationMs)
+            val srcMs = (clip.trimStartMs + (localMs * clip.safeSpeed).toLong()).coerceIn(clip.trimStartMs, clip.trimEndMs)
+            StudioCreativeTools.extractFrameBitmap(appContext, clip.uri, srcMs)
+        } else {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val uri = Uri.parse(clip.uri)
+                    val input = if (uri.scheme == "file" && uri.path != null) {
+                        File(uri.path!!).inputStream()
+                    } else {
+                        appContext.contentResolver.openInputStream(uri)
+                    }
+                    input?.use { android.graphics.BitmapFactory.decodeStream(it) }
+                }.getOrNull()
+            }
+        }
+    }
+
+    fun generateAiHooksAndIdeas(topic: String) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(aiIdeasLoading = true, aiIdeasError = null) }
+            val frame = captureCurrentPlayheadFrame()
+            val tl = _uiState.value.timeline
+            val result = GeminiColoristService.generateHooksAndEditIdeas(
+                frameBitmap = frame,
+                topic = topic,
+                clipCount = tl.mainClips.size,
+                durationMs = tl.totalDurationMs
+            )
+            frame?.recycle()
+            result.onSuccess { ideas ->
+                _uiState.update {
+                    it.copy(aiIdeasLoading = false, aiIdeasResult = ideas, aiIdeasError = null)
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        aiIdeasLoading = false,
+                        aiIdeasError = err.localizedMessage ?: "Gemini request failed. Check connection and try again."
+                    )
+                }
+            }
+        }
+    }
+
+    fun insertAiHookAsOverlay(hookText: String) {
+        val clean = hookText.trim()
+        if (clean.isEmpty()) return
+        pausePlayback()
+        val state = _uiState.value
+        val nextZ = (state.timeline.overlays.maxOfOrNull { it.zIndex } ?: 0) + 1
+        val overlay = OverlayLayer(
+            type = OverlayType.TEXT,
+            zIndex = nextZ,
+            startTimeMs = state.playheadMs.coerceAtLeast(0L),
+            durationMs = 3000L,
+            offsetX = 0f,
+            offsetY = -0.18f,
+            scale = 1f,
+            displayName = "AI Hook",
+            text = clean,
+            fontId = "bundled_anton",
+            fontSizeSp = 34f,
+            textColorArgb = 0xFFFFFFFF,
+            strokeColorArgb = 0xFF000000,
+            hasStroke = true,
+            hasDropShadow = true,
+            hasBackground = true,
+            backgroundColorArgb = 0xCC0A0C10,
+            textMotionPreset = TextMotionPreset.POP_SPRING,
+            textMotionDurationMs = 750L
+        )
+        dispatchCommand(
+            command = AddOverlayCommand(overlay, "Add AI Hook"),
+            newSelection = SelectedItem.OverlayItem(overlay.id),
+            newInspector = InspectorTab.TEXT_STYLE
+        )
+        _feedback.tryEmit("Added AI hook to timeline")
+    }
+
+    fun generateAiColorGrade(prompt: String) {
+        val clipId = resolveTargetMainClipId() ?: run {
+            _uiState.update { it.copy(aiColoristError = "Add or select a video/photo clip first.") }
+            return
+        }
+        val clip = _uiState.value.timeline.mainClips.firstOrNull { it.id == clipId } ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(aiColoristLoading = true, aiColoristError = null, aiColoristNote = null) }
+            val frame = captureCurrentPlayheadFrame()
+            val result = GeminiColoristService.generateColorGrade(
+                frameBitmap = frame,
+                prompt = prompt,
+                currentAdjustments = clip.colorAdjustments
+            )
+            frame?.recycle()
+            result.onSuccess { grade ->
+                updateSelectedColorAdjustments(grade.adjustments)
+                _uiState.update {
+                    it.copy(
+                        aiColoristLoading = false,
+                        aiColoristNote = grade.coloristNote,
+                        aiColoristError = null
+                    )
+                }
+                _feedback.tryEmit("Applied Gemini AI color grade")
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        aiColoristLoading = false,
+                        aiColoristError = err.localizedMessage ?: "AI Colorist failed. Please retry."
+                    )
+                }
+            }
+        }
+    }
+
+    fun generateAiCaptionsFromScript(script: String) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(aiCaptionsLoading = true, aiCaptionsError = null) }
+            val state = _uiState.value
+            val startAt = state.playheadMs.coerceAtLeast(0L)
+            val targetDur = (state.timeline.totalDurationMs - startAt).coerceAtLeast(4000L)
+            val result = GeminiColoristService.generateTimedCaptionsFromScript(
+                script = script,
+                startAtMs = startAt,
+                targetDurationMs = targetDur
+            )
+            result.onSuccess { blocks ->
+                dispatchCommand(
+                    command = AddCaptionsCommand(blocks, "AI Captions (${blocks.size})"),
+                    newSelection = SelectedItem.CaptionItem(blocks.first().id),
+                    newInspector = InspectorTab.CAPTIONS
+                )
+                _uiState.update { it.copy(aiCaptionsLoading = false, aiCaptionsError = null) }
+                _feedback.tryEmit("Generated ${blocks.size} karaoke captions")
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        aiCaptionsLoading = false,
+                        aiCaptionsError = err.localizedMessage ?: "AI caption generation failed."
+                    )
+                }
+            }
+        }
+    }
+
     fun updateProjectTitle(title: String) {
         val before = _uiState.value.projectTitle
         val clean = title.trim().ifBlank { "Untitled Edit" }
@@ -1921,10 +2641,446 @@ class EditorViewModel(
         return (existing.maxOfOrNull { it.laneIndex } ?: 0) + 1
     }
 
+    // --- KineMaster Pro v3.0: Visual FX Layers (Magnifier, Mosaic, Blur), Transform/Crop/PanZoom, AI Cutout & Dual-Engine Auto Captions ---
+
+    fun addFxLayer(type: FxType, fullFrame: Boolean = false) {
+        pausePlayback()
+        val state = _uiState.value
+        val activeRange = state.timeline.mainClipAt(state.playheadMs)
+        val startMs = if (fullFrame && activeRange != null) activeRange.startMs else state.playheadMs.coerceAtLeast(0L)
+        val durMs = if (fullFrame && activeRange != null) {
+            activeRange.clip.durationMs.coerceAtLeast(500L)
+        } else {
+            minOf(4000L, (state.timeline.totalDurationMs - startMs).coerceAtLeast(3000L))
+        }
+        val fx = FxLayer(
+            type = type,
+            startTimeMs = startMs,
+            durationMs = durMs,
+            fullFrame = fullFrame,
+            shape = if (type == FxType.MAGNIFIER) FxShape.CIRCLE else FxShape.ROUNDED_RECT,
+            centerX = 0.5f,
+            centerY = 0.5f,
+            width = if (type == FxType.MAGNIFIER) 0.34f else 0.38f,
+            height = if (type == FxType.MAGNIFIER) 0.34f else 0.28f,
+            intensity = when (type) {
+                FxType.MAGNIFIER -> 0.55f
+                FxType.MOSAIC -> 0.50f
+                FxType.BLUR -> 0.55f
+            },
+            magnification = 2.0f,
+            feather = 0.14f,
+            opacity = 1.0f,
+            showBorderRing = type == FxType.MAGNIFIER
+        )
+        dispatchCommand(
+            command = AddFxLayerCommand(fx),
+            newSelection = SelectedItem.FxItem(fx.id),
+            newInspector = InspectorTab.VISUAL_FX
+        )
+        val modeTxt = if (fullFrame) "Full Clip" else "Movable Region"
+        _feedback.tryEmit("Added ${type.displayName} FX ($modeTxt)")
+    }
+
+    fun selectFxLayer(fxId: String) {
+        selectItem(SelectedItem.FxItem(fxId), InspectorTab.VISUAL_FX)
+    }
+
+    fun updateSelectedFxLayer(transform: (FxLayer) -> FxLayer) {
+        val state = _uiState.value
+        val targetId = (state.selection as? SelectedItem.FxItem)?.fxId
+            ?: state.timeline.fxLayers.firstOrNull()?.id
+            ?: return
+        val before = state.timeline.fxLayers.firstOrNull { it.id == targetId } ?: return
+        val after = transform(before)
+        if (after == before) return
+        dispatchCommand(UpdateFxLayerCommand(targetId, before, after))
+    }
+
+    fun moveOrTrimFxLayer(fxId: String, newStartMs: Long, newDurationMs: Long) {
+        val before = _uiState.value.timeline.fxLayers.firstOrNull { it.id == fxId } ?: return
+        val after = before.copy(
+            startTimeMs = newStartMs.coerceAtLeast(0L),
+            durationMs = newDurationMs.coerceIn(300L, 180_000L)
+        )
+        if (after == before) return
+        dispatchCommand(UpdateFxLayerCommand(fxId, before, after, label = "Retiming ${before.type.displayName} FX"))
+    }
+
+    fun updateFxRegionLive(
+        fxId: String,
+        centerX: Float,
+        centerY: Float,
+        width: Float? = null,
+        height: Float? = null
+    ) {
+        val before = _uiState.value.timeline.fxLayers.firstOrNull { it.id == fxId } ?: return
+        val after = before.copy(
+            centerX = centerX.coerceIn(0.05f, 0.95f),
+            centerY = centerY.coerceIn(0.05f, 0.95f),
+            width = (width ?: before.width).coerceIn(0.10f, 1.0f),
+            height = (height ?: before.height).coerceIn(0.10f, 1.0f)
+        )
+        if (after == before) return
+        dispatchCommand(UpdateFxLayerCommand(fxId, before, after, label = "Position ${before.type.displayName} FX"))
+    }
+
+    fun updateSelectedGeometry(transform: ClipTransform) {
+        val state = _uiState.value
+        val clamped = ClipTransform(
+            offsetX = transform.offsetX.coerceIn(-1f, 1f),
+            offsetY = transform.offsetY.coerceIn(-1f, 1f),
+            scale = transform.scale.coerceIn(0.25f, 4.0f),
+            rotationDegrees = transform.rotationDegrees.coerceIn(-180f, 180f),
+            opacity = transform.opacity.coerceIn(0f, 1f),
+            flipHorizontal = transform.flipHorizontal,
+            flipVertical = transform.flipVertical,
+            fullFrameFill = transform.fullFrameFill,
+            crop = transform.crop.sanitized()
+        )
+        val sel = state.selection
+        if (sel is SelectedItem.OverlayItem) {
+            val before = state.timeline.overlays.firstOrNull { it.id == sel.overlayId } ?: return
+            val after = before.copy(
+                offsetX = clamped.offsetX,
+                offsetY = clamped.offsetY,
+                scale = clamped.scale,
+                rotationDegrees = clamped.rotationDegrees,
+                opacity = clamped.opacity,
+                flipHorizontal = clamped.flipHorizontal,
+                flipVertical = clamped.flipVertical,
+                fullFrameFill = clamped.fullFrameFill,
+                crop = clamped.crop
+            )
+            if (after == before) return
+            dispatchCommand(
+                OverlayPropertyCommand(
+                    overlayId = sel.overlayId,
+                    before = before,
+                    after = after,
+                    label = "Transform Overlay"
+                )
+            )
+            return
+        }
+        val targetId = resolveTargetMainClipId() ?: return
+        val clip = state.timeline.mainClips.firstOrNull { it.id == targetId } ?: return
+        if (clip.baseTransform == clamped) return
+        dispatchCommand(
+            ClipKeyframesCommand(
+                clipId = clip.id,
+                beforeBaseTransform = clip.baseTransform,
+                beforeKeyframes = clip.keyframes,
+                afterBaseTransform = clamped,
+                afterKeyframes = clip.keyframes,
+                label = "Transform & Crop ${clip.displayName}",
+                mergeKey = "geometry:${clip.id}"
+            )
+        )
+    }
+
+    fun resetSelectedGeometry() {
+        val state = _uiState.value
+        historyManager.breakCoalescing()
+        val sel = state.selection
+        if (sel is SelectedItem.OverlayItem) {
+            val before = state.timeline.overlays.firstOrNull { it.id == sel.overlayId } ?: return
+            val after = before.copy(
+                offsetX = 0f,
+                offsetY = 0f,
+                scale = 1f,
+                rotationDegrees = 0f,
+                opacity = 1f,
+                flipHorizontal = false,
+                flipVertical = false,
+                fullFrameFill = false,
+                crop = CropRect()
+            )
+            dispatchCommand(
+                OverlayPropertyCommand(
+                    overlayId = sel.overlayId,
+                    before = before,
+                    after = after,
+                    label = "Reset Overlay Transform"
+                )
+            )
+            _feedback.tryEmit("Reset overlay geometry")
+            return
+        }
+        val targetId = resolveTargetMainClipId() ?: return
+        val clip = state.timeline.mainClips.firstOrNull { it.id == targetId } ?: return
+        dispatchCommand(
+            ClipKeyframesCommand(
+                clipId = clip.id,
+                beforeBaseTransform = clip.baseTransform,
+                beforeKeyframes = clip.keyframes,
+                afterBaseTransform = ClipTransform(),
+                afterKeyframes = clip.keyframes,
+                label = "Reset Clip Transform",
+                mergeKey = null
+            )
+        )
+        if (clip.panZoom.enabled) {
+            dispatchCommand(
+                MainClipPanZoomCommand(
+                    clipId = clip.id,
+                    before = clip.panZoom,
+                    after = PanZoomSpec(),
+                    label = "Reset Pan & Zoom"
+                )
+            )
+        }
+        _feedback.tryEmit("Reset transform, crop & zoom")
+    }
+
+    fun updateSelectedClipPanZoom(spec: PanZoomSpec) {
+        val targetId = resolveTargetMainClipId() ?: return
+        val clip = _uiState.value.timeline.mainClips.firstOrNull { it.id == targetId } ?: return
+        if (clip.panZoom == spec) return
+        dispatchCommand(
+            MainClipPanZoomCommand(
+                clipId = clip.id,
+                before = clip.panZoom,
+                after = spec,
+                label = if (spec.enabled) "Pan & Zoom" else "Disable Pan & Zoom"
+            )
+        )
+    }
+
+    fun updateSelectedCutout(settings: AiCutoutSettings) {
+        val state = _uiState.value
+        val sel = state.selection
+        if (sel is SelectedItem.OverlayItem) {
+            val before = state.timeline.overlays.firstOrNull { it.id == sel.overlayId } ?: return
+            if (before.aiCutout == settings) return
+            dispatchCommand(
+                OverlayPropertyCommand(
+                    overlayId = sel.overlayId,
+                    before = before,
+                    after = before.copy(aiCutout = settings),
+                    label = if (settings.enabled) "AI Cutout Overlay" else "Disable Cutout"
+                )
+            )
+            return
+        }
+        val targetId = resolveTargetMainClipId() ?: return
+        val clip = state.timeline.mainClips.firstOrNull { it.id == targetId } ?: return
+        if (clip.aiCutout == settings) return
+        dispatchCommand(
+            MainClipCutoutCommand(
+                clipId = targetId,
+                before = clip.aiCutout,
+                after = settings,
+                label = if (settings.enabled) "AI Subject Cutout" else "Disable AI Cutout"
+            )
+        )
+    }
+
+    fun importCustomCutoutBackground(uri: Uri) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isImporting = true) }
+            val result = repository.mediaStorage.importImageFromUri(uri)
+            _uiState.update { it.copy(isImporting = false) }
+            result.onSuccess { meta ->
+                val state = _uiState.value
+                val currentCutout = state.selectedOverlay?.aiCutout
+                    ?: (state.selectedMainClip ?: state.timeline.mainClipAt(state.playheadMs)?.clip)?.aiCutout
+                    ?: AiCutoutSettings()
+                updateSelectedCutout(
+                    currentCutout.copy(
+                        enabled = true,
+                        backgroundMode = CutoutBackgroundMode.CUSTOM_IMAGE,
+                        customBackgroundUri = meta.uriString
+                    )
+                )
+                _feedback.tryEmit("Applied custom cutout background")
+            }.onFailure {
+                _feedback.tryEmit("Could not load background photo")
+            }
+        }
+    }
+
+    fun runGeminiAutoCaptions(languageHint: String) {
+        pausePlayback()
+        val state = _uiState.value
+
+        // Resolve target clip with audio: selected audio -> selected video -> clip at playhead -> first audio/video clip
+        data class AudioSourceTarget(
+            val uri: String,
+            val trimStartMs: Long,
+            val trimEndMs: Long,
+            val timelineStartMs: Long,
+            val label: String
+        )
+
+        val target: AudioSourceTarget? = when (val sel = state.selection) {
+            is SelectedItem.AudioItem -> state.timeline.audioClips.firstOrNull { it.id == sel.audioId }?.let {
+                AudioSourceTarget(it.uri, it.trimStartMs, it.trimEndMs, it.startTimeMs, it.displayName)
+            }
+            is SelectedItem.MainClipItem -> state.timeline.mainClipRanges()
+                .firstOrNull { it.clip.id == sel.clipId && it.clip.mediaType == MainMediaType.VIDEO }
+                ?.let { AudioSourceTarget(it.clip.uri, it.clip.trimStartMs, it.clip.trimEndMs, it.startMs, it.clip.displayName) }
+            else -> null
+        } ?: state.timeline.mainClipAt(state.playheadMs)
+            ?.takeIf { it.clip.mediaType == MainMediaType.VIDEO }
+            ?.let { AudioSourceTarget(it.clip.uri, it.clip.trimStartMs, it.clip.trimEndMs, it.startMs, it.clip.displayName) }
+            ?: state.timeline.audioClips.firstOrNull()?.let {
+                AudioSourceTarget(it.uri, it.trimStartMs, it.trimEndMs, it.startTimeMs, it.displayName)
+            }
+            ?: state.timeline.mainClipRanges().firstOrNull { it.clip.mediaType == MainMediaType.VIDEO }?.let {
+                AudioSourceTarget(it.clip.uri, it.clip.trimStartMs, it.clip.trimEndMs, it.startMs, it.clip.displayName)
+            }
+
+        if (target == null) {
+            _uiState.update {
+                it.copy(autoCaptionError = "Add a video or audio clip first to transcribe speech.")
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    autoCaptionLoading = true,
+                    autoCaptionStatus = "Extracting audio from ${target.label}…",
+                    autoCaptionError = null
+                )
+            }
+            try {
+                val extracted = AudioClipExtractor.extractForTranscription(
+                    context = appContext,
+                    uriString = target.uri,
+                    trimStartMs = target.trimStartMs,
+                    trimEndMs = target.trimEndMs
+                ).getOrElse { err ->
+                    _uiState.update {
+                        it.copy(
+                            autoCaptionLoading = false,
+                            autoCaptionStatus = null,
+                            autoCaptionError = err.localizedMessage ?: "No audio track found in clip."
+                        )
+                    }
+                    return@launch
+                }
+
+                _uiState.update {
+                    it.copy(autoCaptionStatus = "Transcribing speech with Gemini AI ($languageHint)…")
+                }
+
+                val result = GeminiColoristService.transcribeAudioToCaptions(
+                    audioBytes = extracted.bytes,
+                    mimeType = extracted.mimeType,
+                    clipStartOnTimelineMs = target.timelineStartMs,
+                    clipDurationMs = extracted.durationMs,
+                    languageHint = languageHint
+                )
+
+                result.onSuccess { captions ->
+                    dispatchCommand(
+                        command = AddCaptionsCommand(captions, "AI Auto Captions (${captions.size})"),
+                        newSelection = SelectedItem.CaptionItem(captions.first().id),
+                        newInspector = InspectorTab.CAPTIONS
+                    )
+                    _uiState.update {
+                        it.copy(
+                            autoCaptionLoading = false,
+                            autoCaptionStatus = "Added ${captions.size} synced captions",
+                            autoCaptionError = null
+                        )
+                    }
+                    _feedback.tryEmit("Transcribed ${captions.size} timed captions")
+                }.onFailure { err ->
+                    _uiState.update {
+                        it.copy(
+                            autoCaptionLoading = false,
+                            autoCaptionStatus = null,
+                            autoCaptionError = err.localizedMessage ?: "Gemini transcription failed. Try again or use Offline Mic."
+                        )
+                    }
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        autoCaptionLoading = false,
+                        autoCaptionStatus = null,
+                        autoCaptionError = e.localizedMessage ?: "Auto caption transcription failed."
+                    )
+                }
+            }
+        }
+    }
+
+    fun startOfflineMicDictation() {
+        if (_uiState.value.isLiveMicDictating) return
+        if (_uiState.value.isRecordingVoiceover) stopVoiceoverRecording()
+        _uiState.update {
+            it.copy(
+                autoCaptionError = null,
+                autoCaptionStatus = "Listening via device mic…"
+            )
+        }
+        offlineSpeechEngine.start(
+            currentPlayheadMs = { _uiState.value.playheadMs },
+            onPartialText = { partial ->
+                _uiState.update { it.copy(liveMicPartialText = partial) }
+            },
+            onFinalPhrase = { phrase, startMs, endMs ->
+                val clean = phrase.trim()
+                if (clean.isNotEmpty()) {
+                    val caption = CaptionClip(
+                        text = clean,
+                        startTimeMs = startMs.coerceAtLeast(0L),
+                        endTimeMs = endMs.coerceAtLeast(startMs + 800L),
+                        animationPreset = CaptionAnimationPreset.ACTIVE_WORD_HIGHLIGHT
+                    )
+                    dispatchCommand(
+                        command = AddCaptionsCommand(listOf(caption), "Mic Caption"),
+                        newSelection = SelectedItem.CaptionItem(caption.id),
+                        newInspector = InspectorTab.CAPTIONS
+                    )
+                    _uiState.update { it.copy(liveMicPartialText = "") }
+                }
+            },
+            onError = { errMsg ->
+                _uiState.update {
+                    it.copy(
+                        isLiveMicDictating = false,
+                        liveMicPartialText = "",
+                        autoCaptionStatus = null,
+                        autoCaptionError = errMsg
+                    )
+                }
+            },
+            onListeningChanged = { active ->
+                _uiState.update {
+                    it.copy(
+                        isLiveMicDictating = active,
+                        autoCaptionStatus = if (active) "Listening offline… speak now" else null
+                    )
+                }
+            }
+        )
+    }
+
+    fun stopOfflineMicDictation() {
+        offlineSpeechEngine.stop()
+        _uiState.update {
+            it.copy(
+                isLiveMicDictating = false,
+                liveMicPartialText = "",
+                autoCaptionStatus = null
+            )
+        }
+    }
+
     override fun onCleared() {
         pausePlayback()
         voiceoverMeterJob?.cancel()
         voiceoverRecorder.stopAndDiscard()
+        offlineSpeechEngine.release()
+        StudioCreativeTools.stopAudition()
         exportEngine.cancelExport()
         super.onCleared()
     }

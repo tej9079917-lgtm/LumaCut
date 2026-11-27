@@ -2,11 +2,6 @@ name: Build & Release LumaCut APK
 
 on:
   push:
-    branches:
-      - main
-      - master
-    tags:
-      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -34,8 +29,10 @@ jobs:
 
       - name: Accept Android SDK licenses
         run: |
-          if [ -x "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" ]; then
-            yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -n 1 || true)"
+          if [ -n "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
           fi
 
       - name: Prepare signing keystore
@@ -65,11 +62,11 @@ jobs:
           if [ -n "$KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ]; then
             echo "$KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
             export KEYSTORE_PATH="$PWD/my-upload-key.jks"
-            gradle :app:assembleRelease --no-daemon
+            gradle :app:assembleRelease --no-daemon --no-configuration-cache
             cp app/build/outputs/apk/release/app-release.apk dist/LumaCut.apk
             echo "build_type=Release (Signed)" >> "$GITHUB_OUTPUT"
           else
-            gradle :app:assembleDebug --no-daemon
+            gradle :app:assembleDebug --no-daemon --no-configuration-cache
             cp app/build/outputs/apk/debug/app-debug.apk dist/LumaCut.apk
             echo "build_type=Installable APK" >> "$GITHUB_OUTPUT"
           fi
@@ -100,6 +97,7 @@ jobs:
             gh release edit "$TAG" --title "$TITLE" --notes "$NOTES" --latest
           else
             gh release create "$TAG" dist/LumaCut.apk \
+              --target "${GITHUB_SHA}" \
               --title "$TITLE" \
               --notes "$NOTES" \
               --latest

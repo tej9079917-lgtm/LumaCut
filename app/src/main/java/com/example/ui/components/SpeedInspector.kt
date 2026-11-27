@@ -19,9 +19,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AcUnit
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Timeline
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -37,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import com.example.media.SpeedRampPreset
 import com.example.model.MainClip
 import com.example.model.MainMediaType
 import com.example.ui.theme.ActiveRail
@@ -57,6 +62,8 @@ import kotlin.math.roundToInt
 fun SpeedInspector(
     clip: MainClip?,
     onUpdateSpeed: (speed: Float, pitchSemitones: Float, preservePitch: Boolean) -> Unit,
+    onInsertFreezeFrame: () -> Unit = {},
+    onApplySpeedRamp: (SpeedRampPreset) -> Unit = {},
     onReset: () -> Unit,
     onClose: () -> Unit
 ) {
@@ -137,6 +144,67 @@ fun SpeedInspector(
                             text = label,
                             style = MaterialTheme.typography.labelMedium,
                             color = if (picked) CinemaAmber else ChalkWhite
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // 1B. 1-Tap Freeze Frame + Multi-Segment Speed Ramping Presets
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Icon(Icons.Default.Timeline, contentDescription = null, tint = CinemaAmber, modifier = Modifier.size(15.dp))
+                    Text("Speed Ramp Curves", style = MaterialTheme.typography.labelMedium, color = ChalkWhite)
+                }
+                FilledTonalButton(
+                    onClick = onInsertFreezeFrame,
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = AmberContainer,
+                        contentColor = CinemaAmber
+                    ),
+                    modifier = Modifier.height(32.dp).testTag("btn_freeze_frame")
+                ) {
+                    Icon(Icons.Default.AcUnit, contentDescription = "Insert freeze frame", modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Freeze Frame", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp)
+            ) {
+                SpeedRampPreset.entries.forEach { ramp ->
+                    Column(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(ObsidianBg)
+                            .border(1.dp, BorderHairline, RoundedCornerShape(8.dp))
+                            .clickable { onApplySpeedRamp(ramp) }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .testTag("speed_ramp_${ramp.name.lowercase()}")
+                    ) {
+                        Text(
+                            text = ramp.displayName,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = CinemaAmber
+                        )
+                        Text(
+                            text = ramp.subtitle,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = SilverMuted
                         )
                     }
                 }

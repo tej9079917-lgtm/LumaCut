@@ -18,6 +18,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.FileOutputOptions
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
@@ -373,7 +374,12 @@ fun ProCameraModal(
                         }
 
                         val recorder = Recorder.Builder()
-                            .setQualitySelector(QualitySelector.from(Quality.FHD))
+                            .setQualitySelector(
+                                QualitySelector.from(
+                                    Quality.FHD,
+                                    FallbackStrategy.lowerQualityOrHigherThan(Quality.FHD)
+                                )
+                            )
                             .build()
                         val vc = VideoCapture.withOutput(recorder)
                         videoCapture = vc

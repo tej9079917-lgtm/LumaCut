@@ -28,10 +28,12 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.FontDownload
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TextFields
@@ -39,6 +41,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -62,14 +66,20 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.media.CinemaSfxPreset
 import com.example.media.FontResolver
 import com.example.model.AspectRatio
 import com.example.model.AudioSettings
+import com.example.model.CanvasBackdrop
+import com.example.model.CanvasBackdropMode
+import com.example.model.CanvasGradientPreset
 import com.example.model.FilterPreset
 import com.example.model.OverlayBlendMode
 import com.example.model.OverlayLayer
+import com.example.model.SafeZoneOverlay
 import com.example.model.StudioFont
 import com.example.model.TextMotionPreset
+import com.example.model.VoiceEffectPreset
 import com.example.model.formatTimecode
 import com.example.ui.theme.ActiveRail
 import com.example.ui.theme.AmberContainer
@@ -208,10 +218,14 @@ fun FilterInspector(
 fun AudioMixerInspector(
     trackLabel: String,
     settings: AudioSettings,
+    canExtractAudio: Boolean = false,
     isRecordingVoiceover: Boolean = false,
     voiceoverLevel: Float = 0f,
     voiceoverElapsedMs: Long = 0L,
     onToggleVoiceoverRecording: () -> Unit = {},
+    onExtractAudio: () -> Unit = {},
+    onPreviewSfx: (CinemaSfxPreset) -> Unit = {},
+    onInsertSfx: (CinemaSfxPreset) -> Unit = {},
     onChange: (AudioSettings) -> Unit,
     onClose: () -> Unit
 ) {
@@ -330,6 +344,21 @@ fun AudioMixerInspector(
                         )
                     }
                 }
+
+                if (canExtractAudio) {
+                    FilledTonalButton(
+                        onClick = onExtractAudio,
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = ActiveRail,
+                            contentColor = ChalkWhite
+                        ),
+                        modifier = Modifier.height(34.dp).testTag("btn_extract_audio")
+                    ) {
+                        Icon(Icons.Default.AudioFile, contentDescription = "Extract audio", modifier = Modifier.size(15.dp))
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text("Extract", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
             }
 
             StudioSliderRow(
@@ -408,6 +437,187 @@ fun AudioMixerInspector(
                 onValueChange = { onChange(settings.copy(eqHighDb = it.roundToInt().toFloat())) },
                 testTag = "slider_eq_high"
             )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Audio Pro DSP: Auto-Ducking, Voice Isolation & Noise Gate
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(ObsidianBg)
+                    .border(1.dp, BorderHairline, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Auto-Duck Under Voice", style = MaterialTheme.typography.labelMedium, color = ChalkWhite)
+                        Text("Lowers music automatically when voice speaks", style = MaterialTheme.typography.labelSmall, color = SilverMuted)
+                    }
+                    Switch(
+                        checked = settings.autoDuckMusic,
+                        onCheckedChange = { onChange(settings.copy(autoDuckMusic = it)) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = OnAmber,
+                            checkedTrackColor = CinemaAmber,
+                            uncheckedThumbColor = SilverMuted,
+                            uncheckedTrackColor = ActiveRail
+                        ),
+                        modifier = Modifier.testTag("switch_auto_duck")
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Voice Isolation DSP", style = MaterialTheme.typography.labelMedium, color = ChalkWhite)
+                        Text("85Hz rumble filter + vocal clarity boost", style = MaterialTheme.typography.labelSmall, color = SilverMuted)
+                    }
+                    Switch(
+                        checked = settings.voiceIsolation,
+                        onCheckedChange = { onChange(settings.copy(voiceIsolation = it)) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = OnAmber,
+                            checkedTrackColor = CinemaAmber,
+                            uncheckedThumbColor = SilverMuted,
+                            uncheckedTrackColor = ActiveRail
+                        ),
+                        modifier = Modifier.testTag("switch_voice_isolation")
+                    )
+                }
+            }
+
+            StudioSliderRow(
+                label = "Denoise",
+                valueText = if (settings.denoiseStrength <= 0.02f) "Off" else "${(settings.denoiseStrength * 100).roundToInt()}%",
+                value = settings.denoiseStrength,
+                range = 0f..1f,
+                onValueChange = { onChange(settings.copy(denoiseStrength = it)) },
+                testTag = "slider_audio_denoise"
+            )
+            StudioSliderRow(
+                label = "Noise Gate",
+                valueText = if (settings.noiseGateDb <= -58f) "Off" else "${settings.noiseGateDb.roundToInt()}dB",
+                value = settings.noiseGateDb,
+                range = -60f..-12f,
+                onValueChange = { onChange(settings.copy(noiseGateDb = it.roundToInt().toFloat())) },
+                testTag = "slider_noise_gate"
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Voice Effects (Voice Changer DSP Presets)
+            Text(
+                text = "Voice Effects (${settings.voiceEffect.displayName})",
+                style = MaterialTheme.typography.labelSmall,
+                color = CinemaAmber,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 14.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp)
+            ) {
+                VoiceEffectPreset.entries.forEach { effect ->
+                    val picked = settings.voiceEffect == effect
+                    Column(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(if (picked) AmberContainer else ObsidianBg)
+                            .border(
+                                width = if (picked) 1.5.dp else 1.dp,
+                                color = if (picked) CinemaAmber else BorderHairline,
+                                shape = RoundedCornerShape(9.dp)
+                            )
+                            .clickable { onChange(settings.copy(voiceEffect = effect)) }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .testTag("voice_fx_${effect.name.lowercase()}")
+                    ) {
+                        Text(
+                            text = effect.displayName,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (picked) CinemaAmber else ChalkWhite
+                        )
+                        Text(
+                            text = effect.subtitle,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = SilverMuted
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Offline Cinema SFX Library (Tap play to audition, tap + to drop at playhead)
+            Text(
+                text = "Built-in Cinema SFX (Offline)",
+                style = MaterialTheme.typography.labelSmall,
+                color = CinemaAmber,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 14.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                CinemaSfxPreset.entries.forEach { sfx ->
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(ObsidianBg)
+                            .border(1.dp, BorderHairline, RoundedCornerShape(9.dp))
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                            .testTag("sfx_card_${sfx.name.lowercase()}"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .background(ActiveRail)
+                                .clickable { onPreviewSfx(sfx) }
+                                .testTag("sfx_preview_${sfx.name.lowercase()}"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = "Audition ${sfx.displayName}",
+                                tint = CinemaAmber,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        Column {
+                            Text(sfx.displayName, style = MaterialTheme.typography.labelMedium, color = ChalkWhite)
+                            Text(sfx.category, style = MaterialTheme.typography.labelSmall, color = SilverMuted)
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(AmberContainer)
+                                .border(1.dp, CinemaAmber, RoundedCornerShape(6.dp))
+                                .clickable { onInsertSfx(sfx) }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                .testTag("sfx_insert_${sfx.name.lowercase()}")
+                        ) {
+                            Text("+ Add", style = MaterialTheme.typography.labelSmall, color = CinemaAmber)
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -743,12 +953,22 @@ fun ImageOverlayInspector(
 @Composable
 fun CanvasAspectInspector(
     current: AspectRatio,
+    backdrop: CanvasBackdrop = CanvasBackdrop(),
+    safeZone: SafeZoneOverlay = SafeZoneOverlay.NONE,
     onSelect: (AspectRatio) -> Unit,
+    onUpdateBackdrop: (CanvasBackdrop) -> Unit = {},
+    onUpdateSafeZone: (SafeZoneOverlay) -> Unit = {},
     onClose: () -> Unit
 ) {
     Surface(color = InspectorCharcoal, modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(bottom = 14.dp)) {
-            InspectorHeader(title = "Canvas Aspect Ratio", onClose = onClose)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 320.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 14.dp)
+        ) {
+            InspectorHeader(title = "Canvas, Backdrop & Safe Zones", onClose = onClose)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -768,7 +988,7 @@ fun CanvasAspectInspector(
                                 shape = RoundedCornerShape(10.dp)
                             )
                             .clickable { onSelect(ratio) }
-                            .padding(vertical = 12.dp, horizontal = 8.dp)
+                            .padding(vertical = 10.dp, horizontal = 8.dp)
                             .testTag("aspect_${ratio.name.lowercase()}"),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
@@ -783,6 +1003,131 @@ fun CanvasAspectInspector(
                             style = MaterialTheme.typography.labelSmall,
                             color = SilverMuted,
                             maxLines = 1
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Canvas Backdrop Mode (Obsidian, Blur Fill, Studio Gradient)
+            Text(
+                text = "Canvas Backdrop",
+                style = MaterialTheme.typography.labelSmall,
+                color = CinemaAmber,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                CanvasBackdropMode.entries.forEach { mode ->
+                    val picked = backdrop.mode == mode
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (picked) AmberContainer else ActiveRail)
+                            .border(
+                                width = if (picked) 1.5.dp else 1.dp,
+                                color = if (picked) CinemaAmber else BorderHairline,
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            .clickable { onUpdateBackdrop(backdrop.copy(mode = mode)) }
+                            .padding(vertical = 7.dp)
+                            .testTag("backdrop_mode_${mode.name.lowercase()}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = mode.displayName,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (picked) CinemaAmber else ChalkWhite
+                        )
+                    }
+                }
+            }
+
+            if (backdrop.mode == CanvasBackdropMode.GRADIENT) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CanvasGradientPreset.entries.forEach { preset ->
+                        val picked = backdrop.gradientPreset == preset
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onUpdateBackdrop(backdrop.copy(gradientPreset = preset)) }
+                                .testTag("backdrop_grad_${preset.name.lowercase()}")
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(
+                                        Brush.linearGradient(
+                                            listOf(Color(preset.startArgb), Color(preset.endArgb))
+                                        )
+                                    )
+                                    .border(
+                                        width = if (picked) 2.dp else 1.dp,
+                                        color = if (picked) CinemaAmber else BorderHairline,
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
+                            )
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = preset.displayName.substringBefore(" "),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (picked) CinemaAmber else SilverMuted
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Social Safe Zone Overlay Selector
+            Text(
+                text = "Social Safe Zone Guides",
+                style = MaterialTheme.typography.labelSmall,
+                color = CinemaAmber,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                SafeZoneOverlay.entries.forEach { zone ->
+                    val picked = zone == safeZone
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (picked) AmberContainer else ActiveRail)
+                            .border(
+                                width = if (picked) 1.5.dp else 1.dp,
+                                color = if (picked) CinemaAmber else BorderHairline,
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            .clickable { onUpdateSafeZone(zone) }
+                            .padding(vertical = 7.dp)
+                            .testTag("canvas_safe_zone_${zone.name.lowercase()}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = zone.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (picked) CinemaAmber else ChalkWhite
                         )
                     }
                 }

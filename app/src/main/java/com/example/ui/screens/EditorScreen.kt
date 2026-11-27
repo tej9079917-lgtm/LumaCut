@@ -1,6 +1,10 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -37,16 +41,19 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.AcUnit
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Animation
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
@@ -58,11 +65,15 @@ import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Publish
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Style
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.Transform
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VideoCameraBack
 import androidx.compose.material.icons.filled.VideoLibrary
@@ -85,6 +96,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -101,29 +113,41 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.model.AiCutoutSettings
 import com.example.model.AudioSettings
+import com.example.model.ClipTransform
 import com.example.model.ColorAdjustments
 import com.example.model.FilterPreset
+import com.example.model.MainMediaType
+import com.example.model.MaskSettings
 import com.example.model.OverlayType
 import com.example.model.TransitionSpec
 import com.example.model.formatTimecode
+import com.example.ui.components.AiCreativeStudioInspector
 import com.example.ui.components.AudioMixerInspector
 import com.example.ui.components.CanvasAspectInspector
+import com.example.ui.components.CaptionStudioInspector
 import com.example.ui.components.ClipSeamInfo
 import com.example.ui.components.ColorAdjustInspector
+import com.example.ui.components.CutoutInspector
 import com.example.ui.components.EditHistoryBottomSheet
 import com.example.ui.components.ExportBottomSheet
 import com.example.ui.components.FilterInspector
 import com.example.ui.components.FontLibraryInspector
 import com.example.ui.components.ImageOverlayInspector
 import com.example.ui.components.KeyframeInspector
+import com.example.ui.components.KineMasterLandscapeWorkspace
+import com.example.ui.components.LowerThirdTemplatesInspector
+import com.example.ui.components.MaskAndTransformInspector
 import com.example.ui.components.MultilayerTimeline
 import com.example.ui.components.PreviewStage
 import com.example.ui.components.ProCameraModal
 import com.example.ui.components.SpeedInspector
 import com.example.ui.components.TextStyleInspector
+import com.example.ui.components.TransformCropZoomInspector
 import com.example.ui.components.TransitionInspector
 import com.example.ui.components.VideoOverlayChromaInspector
+import com.example.ui.components.VisualFxInspector
 import com.example.ui.theme.ActiveRail
 import com.example.ui.theme.AmberContainer
 import com.example.ui.theme.BorderHairline
@@ -137,12 +161,19 @@ import com.example.ui.theme.SilverMuted
 import com.example.ui.theme.SlateDim
 import com.example.ui.theme.StudioSlate
 import com.example.ui.theme.TrackAudioRose
+import com.example.ui.theme.TrackFxViolet
 import com.example.ui.theme.TrackOverlayEmerald
 import com.example.ui.theme.TrackVideoBlue
 import com.example.viewmodel.EditorUiState
 import com.example.viewmodel.EditorViewModel
 import com.example.viewmodel.InspectorTab
 import com.example.viewmodel.SelectedItem
+
+private tailrec fun Context.findHostActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findHostActivity()
+    else -> null
+}
 
 @Composable
 fun EditorScreen(
@@ -198,11 +229,37 @@ fun EditorScreen(
         uri?.let { viewModel.importCubeLut(it) }
     }
 
+    val pickSrtFile = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { viewModel.importSrtFromUri(it) }
+    }
+
+    val createSrtFile = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/x-subrip")
+    ) { uri ->
+        uri?.let { viewModel.exportSrtToUri(it) }
+    }
+
+    val pickCutoutBackgroundPhoto = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        uri?.let { viewModel.importCustomCutoutBackground(it) }
+    }
+
     val requestVoiceoverMicPermission = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
             viewModel.startVoiceoverRecording()
+        }
+    }
+
+    val requestOfflineMicPermission = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            viewModel.startOfflineMicDictation()
         }
     }
 
@@ -219,6 +276,36 @@ fun EditorScreen(
             } else {
                 requestVoiceoverMicPermission.launch(Manifest.permission.RECORD_AUDIO)
             }
+        }
+    }
+
+    val onToggleOfflineMic: () -> Unit = {
+        if (state.isLiveMicDictating) {
+            viewModel.stopOfflineMicDictation()
+        } else {
+            val hasMic = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (hasMic) {
+                viewModel.startOfflineMicDictation()
+            } else {
+                requestOfflineMicPermission.launch(Manifest.permission.RECORD_AUDIO)
+            }
+        }
+    }
+
+    val onToggleOrientation: (Boolean) -> Unit = { toLandscape ->
+        context.findHostActivity()?.requestedOrientation = if (toLandscape) {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            context.findHostActivity()?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
     }
 
@@ -241,146 +328,78 @@ fun EditorScreen(
         }
     }
 
+    val onImportFontAction: () -> Unit = {
+        pickFontFile.launch(
+            arrayOf("font/ttf", "font/otf", "application/x-font-ttf", "application/octet-stream", "*/*")
+        )
+    }
+    val onImportCubeLutAction: () -> Unit = {
+        pickCubeLutFile.launch(arrayOf("text/plain", "application/octet-stream", "*/*"))
+    }
+    val onImportSrtAction: () -> Unit = {
+        pickSrtFile.launch(arrayOf("application/x-subrip", "text/plain", "*/*"))
+    }
+    val onExportSrtAction: () -> Unit = {
+        val safeName = state.projectTitle.replace(Regex("[^A-Za-z0-9_-]"), "_").ifBlank { "lumacut" }
+        createSrtFile.launch("${safeName}_captions.srt")
+    }
+    val onPickCutoutBgAction: () -> Unit = {
+        pickCutoutBackgroundPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+    }
+
     Scaffold(
         containerColor = ObsidianBg,
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { _ ->
-        Column(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .background(ObsidianBg)
         ) {
-            // 1. Studio Top Bar
-            StudioTopBar(
-                title = state.projectTitle,
-                aspectRatioLabel = state.aspectRatio.label,
-                canUndo = state.canUndo,
-                canRedo = state.canRedo,
-                undoLabel = state.history.undoLabel,
-                redoLabel = state.history.redoLabel,
-                historyCount = state.history.totalCount,
-                isImporting = state.isImporting,
-                onBack = {
-                    viewModel.pausePlayback()
-                    viewModel.saveNow()
-                    onNavigateBack()
-                },
-                onEditTitle = { showRenameDialog = true },
-                onToggleAspect = { viewModel.openInspector(InspectorTab.CANVAS) },
-                onOpenProCamera = { viewModel.openProCamera() },
-                onUndo = { viewModel.undo() },
-                onRedo = { viewModel.redo() },
-                onOpenHistory = { viewModel.openHistorySheet() },
-                onExport = { viewModel.openExportSheet() }
-            )
+            val isHorizontalKineMaster = maxWidth > maxHeight
 
-            // 2. Adaptive Workspace (Portrait stacked vs Wide/Landscape split monitor)
-            BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                val isExpandedWide = maxWidth > 720.dp
-
-                if (isExpandedWide) {
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        Row(modifier = Modifier.weight(0.54f).fillMaxWidth()) {
-                            PreviewStage(
-                                aspectRatio = state.aspectRatio,
-                                timeline = state.timeline,
-                                playheadMs = state.playheadMs,
-                                isPlaying = state.isPlaying,
-                                selection = state.selection,
-                                availableFonts = fonts,
-                                snapGuideX = state.snapGuideX,
-                                snapGuideY = state.snapGuideY,
-                                textMotionReplayNonce = state.textMotionReplayNonce,
-                                showScopes = state.showVideoScopes,
-                                scopeMode = state.scopeMode,
-                                onToggleScopeMode = { viewModel.setScopeMode(it) },
-                                isSamplingChromaColor = state.isSamplingChromaColor,
-                                onSampledChromaColor = { viewModel.applySampledChromaColor(it) },
-                                onSelectOverlay = { viewModel.selectItem(SelectedItem.OverlayItem(it)) },
-                                onClearSelection = { viewModel.selectItem(SelectedItem.None) },
-                                onBeginOverlayGesture = { viewModel.beginOverlayGesture() },
-                                onTransformOverlay = { id, dx, dy, s, r -> viewModel.transformOverlayLive(id, dx, dy, s, r) },
-                                onEndOverlayGesture = { viewModel.endOverlayGesture() },
-                                onDeleteOverlay = {
-                                    viewModel.selectItem(SelectedItem.OverlayItem(it))
-                                    viewModel.deleteSelected()
-                                },
-                                onQuickImportVideo = {
-                                    pickMainVideos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
-                                },
-                                onQuickImportPhoto = {
-                                    pickMainPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                                },
-                                modifier = Modifier.weight(1f)
-                            )
-
-                            if (state.activeInspector != InspectorTab.NONE) {
-                                Box(
-                                    modifier = Modifier
-                                        .width(340.dp)
-                                        .fillMaxHeight()
-                                        .background(InspectorCharcoal)
-                                        .border(1.dp, BorderHairline)
-                                ) {
-                                    ActiveInspectorHost(
-                                        state = state,
-                                        fonts = fonts,
-                                        viewModel = viewModel,
-                                        onImportFont = {
-                                            pickFontFile.launch(
-                                                arrayOf("font/ttf", "font/otf", "application/x-font-ttf", "application/octet-stream", "*/*")
-                                            )
-                                        },
-                                        onImportCubeLut = {
-                                            pickCubeLutFile.launch(arrayOf("text/plain", "application/octet-stream", "*/*"))
-                                        },
-                                        onToggleVoiceover = onToggleVoiceover
-                                    )
-                                }
-                            }
-                        }
-
-                        TransportControlBar(
-                            playheadMs = state.playheadMs,
-                            totalDurationMs = state.timeline.totalDurationMs,
-                            isPlaying = state.isPlaying,
-                            zoom = state.timelineZoom,
-                            showScopes = state.showVideoScopes,
-                            hasAudioBeats = state.timeline.audioClips.any { it.timelineBeatPositionsMs().isNotEmpty() },
-                            onTogglePlay = { viewModel.togglePlayPause() },
-                            onStepBack = { viewModel.stepFrame(-100L) },
-                            onStepForward = { viewModel.stepFrame(100L) },
-                            onSnapPrevBeat = { viewModel.snapPlayheadToBeat(next = false) },
-                            onSnapNextBeat = { viewModel.snapPlayheadToBeat(next = true) },
-                            onToggleScopes = { viewModel.toggleVideoScopes() },
-                            onQuickSplit = { viewModel.splitSelectedAtPlayhead() },
-                            onZoomChange = { viewModel.setTimelineZoom(it) }
-                        )
-
-                        MultilayerTimeline(
-                            timeline = state.timeline,
-                            playheadMs = state.playheadMs,
-                            isPlaying = state.isPlaying,
-                            zoom = state.timelineZoom,
-                            selection = state.selection,
-                            onSeek = { viewModel.seekTo(it) },
-                            onSelectMainClip = { viewModel.selectItem(SelectedItem.MainClipItem(it)) },
-                            onSelectOverlay = { viewModel.selectItem(SelectedItem.OverlayItem(it)) },
-                            onSelectAudio = { viewModel.selectItem(SelectedItem.AudioItem(it)) },
-                            onSelectTransition = { viewModel.selectItem(SelectedItem.TransitionItem(it), InspectorTab.TRANSITION) },
-                            onTrimMainClip = { id, ds, de -> viewModel.trimMainClip(id, ds, de) },
-                            onTrimOverlay = { id, s, d -> viewModel.trimOverlayTiming(id, s, d) },
-                            onTrimAudio = { id, dt, ts, te -> viewModel.trimAudioClip(id, dt, ts, te) },
-                            modifier = Modifier.weight(0.46f)
-                        )
-                    }
-                } else {
-                    Column(modifier = Modifier.fillMaxSize()) {
+            if (isHorizontalKineMaster) {
+                KineMasterLandscapeWorkspace(
+                    state = state,
+                    isTimelineExpanded = state.isTimelineExpanded,
+                    onToggleTimelineExpanded = { viewModel.toggleTimelineExpanded() },
+                    onSwitchToPortrait = { onToggleOrientation(false) },
+                    onNavigateBack = {
+                        viewModel.pausePlayback()
+                        viewModel.saveNow()
+                        onNavigateBack()
+                    },
+                    onUndo = { viewModel.undo() },
+                    onRedo = { viewModel.redo() },
+                    onSplit = { viewModel.splitSelectedAtPlayhead() },
+                    onDeleteSelected = { viewModel.deleteSelected() },
+                    onTogglePlayPause = { viewModel.togglePlayPause() },
+                    onOpenExport = { viewModel.openExportSheet() },
+                    onPickMainMedia = {
+                        pickMainVideos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                    },
+                    onPickOverlayImage = {
+                        pickOverlayPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    },
+                    onPickOverlayVideo = {
+                        pickOverlayVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                    },
+                    onAddTextOverlay = { viewModel.addTextOverlay() },
+                    onAddFx = { type -> viewModel.addFxLayer(type, fullFrame = false) },
+                    onOpenCutout = { viewModel.openInspector(InspectorTab.CUTOUT) },
+                    onOpenCaptions = { viewModel.openInspector(InspectorTab.CAPTIONS) },
+                    onPickAudio = { pickAudioFile.launch(arrayOf("audio/*")) },
+                    onToggleVoiceover = onToggleVoiceover,
+                    onOpenCamera = { viewModel.openProCamera() },
+                    onSelectInspectorTab = { tab -> viewModel.openInspector(tab) },
+                    onReturnToWheel = { viewModel.closeInspector() },
+                    previewContent = { mod ->
                         PreviewStage(
                             aspectRatio = state.aspectRatio,
                             timeline = state.timeline,
                             playheadMs = state.playheadMs,
                             isPlaying = state.isPlaying,
+                            seekNonce = state.seekNonce,
                             selection = state.selection,
                             availableFonts = fonts,
                             snapGuideX = state.snapGuideX,
@@ -390,8 +409,12 @@ fun EditorScreen(
                             scopeMode = state.scopeMode,
                             onToggleScopeMode = { viewModel.setScopeMode(it) },
                             isSamplingChromaColor = state.isSamplingChromaColor,
+                            showCropGuide = state.activeInspector == InspectorTab.TRANSFORM_CROP,
                             onSampledChromaColor = { viewModel.applySampledChromaColor(it) },
                             onSelectOverlay = { viewModel.selectItem(SelectedItem.OverlayItem(it)) },
+                            onSelectCaption = { viewModel.selectItem(SelectedItem.CaptionItem(it), InspectorTab.CAPTIONS) },
+                            onSelectFx = { viewModel.selectFxLayer(it) },
+                            onUpdateFxRegion = { id, cx, cy, w, h -> viewModel.updateFxRegionLive(id, cx, cy, w, h) },
                             onClearSelection = { viewModel.selectItem(SelectedItem.None) },
                             onBeginOverlayGesture = { viewModel.beginOverlayGesture() },
                             onTransformOverlay = { id, dx, dy, s, r -> viewModel.transformOverlayLive(id, dx, dy, s, r) },
@@ -406,7 +429,117 @@ fun EditorScreen(
                             onQuickImportPhoto = {
                                 pickMainPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                             },
-                            modifier = Modifier.weight(if (state.activeInspector == InspectorTab.NONE) 0.48f else 0.38f)
+                            modifier = mod
+                        )
+                    },
+                    dockedInspectorContent = {
+                        ActiveInspectorHost(
+                            state = state,
+                            fonts = fonts,
+                            viewModel = viewModel,
+                            compactDocked = true,
+                            onImportFont = onImportFontAction,
+                            onImportCubeLut = onImportCubeLutAction,
+                            onImportSrt = onImportSrtAction,
+                            onExportSrt = onExportSrtAction,
+                            onPickCutoutBackground = onPickCutoutBgAction,
+                            onToggleVoiceover = onToggleVoiceover,
+                            onToggleOfflineMic = onToggleOfflineMic
+                        )
+                    },
+                    timelineContent = { mod ->
+                        MultilayerTimeline(
+                            timeline = state.timeline,
+                            playheadMs = state.playheadMs,
+                            isPlaying = state.isPlaying,
+                            zoom = state.timelineZoom,
+                            selection = state.selection,
+                            onSeek = { viewModel.scrubTo(it) },
+                            onPauseForScrub = { viewModel.pausePlayback() },
+                            onSelectMainClip = { viewModel.selectItem(SelectedItem.MainClipItem(it)) },
+                            onSelectOverlay = { viewModel.selectItem(SelectedItem.OverlayItem(it)) },
+                            onSelectAudio = { viewModel.selectItem(SelectedItem.AudioItem(it)) },
+                            onSelectTransition = { viewModel.selectItem(SelectedItem.TransitionItem(it), InspectorTab.TRANSITION) },
+                            onSelectCaption = { viewModel.selectItem(SelectedItem.CaptionItem(it), InspectorTab.CAPTIONS) },
+                            onSelectFx = { viewModel.selectFxLayer(it) },
+                            onTrimMainClip = { id, ds, de -> viewModel.trimMainClip(id, ds, de) },
+                            onTrimOverlay = { id, s, d -> viewModel.trimOverlayTiming(id, s, d) },
+                            onTrimAudio = { id, dt, ts, te -> viewModel.trimAudioClip(id, dt, ts, te) },
+                            onMoveCaption = { id, s, e -> viewModel.moveOrTrimCaption(id, s, e) },
+                            onMoveFx = { id, s, d -> viewModel.moveOrTrimFxLayer(id, s, d) },
+                            modifier = mod
+                        )
+                    }
+                )
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(ObsidianBg)
+                ) {
+                    // 1. Studio Top Bar (with 1-Tap Horizontal KineMaster Mode Switch)
+                    StudioTopBar(
+                        title = state.projectTitle,
+                        aspectRatioLabel = state.aspectRatio.label,
+                        canUndo = state.canUndo,
+                        canRedo = state.canRedo,
+                        undoLabel = state.history.undoLabel,
+                        redoLabel = state.history.redoLabel,
+                        historyCount = state.history.totalCount,
+                        isImporting = state.isImporting,
+                        onBack = {
+                            viewModel.pausePlayback()
+                            viewModel.saveNow()
+                            onNavigateBack()
+                        },
+                        onEditTitle = { showRenameDialog = true },
+                        onToggleAspect = { viewModel.openInspector(InspectorTab.CANVAS) },
+                        onSwitchToLandscape = { onToggleOrientation(true) },
+                        onOpenProCamera = { viewModel.openProCamera() },
+                        onUndo = { viewModel.undo() },
+                        onRedo = { viewModel.redo() },
+                        onOpenHistory = { viewModel.openHistorySheet() },
+                        onExport = { viewModel.openExportSheet() }
+                    )
+
+                    // 2. Vertical Portrait Editor Stage + Timeline + Slide-Up Inspector
+                    Column(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        PreviewStage(
+                            aspectRatio = state.aspectRatio,
+                            timeline = state.timeline,
+                            playheadMs = state.playheadMs,
+                            isPlaying = state.isPlaying,
+                            seekNonce = state.seekNonce,
+                            selection = state.selection,
+                            availableFonts = fonts,
+                            snapGuideX = state.snapGuideX,
+                            snapGuideY = state.snapGuideY,
+                            textMotionReplayNonce = state.textMotionReplayNonce,
+                            showScopes = state.showVideoScopes,
+                            scopeMode = state.scopeMode,
+                            onToggleScopeMode = { viewModel.setScopeMode(it) },
+                            isSamplingChromaColor = state.isSamplingChromaColor,
+                            showCropGuide = state.activeInspector == InspectorTab.TRANSFORM_CROP,
+                            onSampledChromaColor = { viewModel.applySampledChromaColor(it) },
+                            onSelectOverlay = { viewModel.selectItem(SelectedItem.OverlayItem(it)) },
+                            onSelectCaption = { viewModel.selectItem(SelectedItem.CaptionItem(it), InspectorTab.CAPTIONS) },
+                            onSelectFx = { viewModel.selectFxLayer(it) },
+                            onUpdateFxRegion = { id, cx, cy, w, h -> viewModel.updateFxRegionLive(id, cx, cy, w, h) },
+                            onClearSelection = { viewModel.selectItem(SelectedItem.None) },
+                            onBeginOverlayGesture = { viewModel.beginOverlayGesture() },
+                            onTransformOverlay = { id, dx, dy, s, r -> viewModel.transformOverlayLive(id, dx, dy, s, r) },
+                            onEndOverlayGesture = { viewModel.endOverlayGesture() },
+                            onDeleteOverlay = {
+                                viewModel.selectItem(SelectedItem.OverlayItem(it))
+                                viewModel.deleteSelected()
+                            },
+                            onQuickImportVideo = {
+                                pickMainVideos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                            },
+                            onQuickImportPhoto = {
+                                pickMainPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                            },
+                            modifier = Modifier.weight(if (state.activeInspector == InspectorTab.NONE) 0.48f else 0.36f)
                         )
 
                         TransportControlBar(
@@ -432,14 +565,19 @@ fun EditorScreen(
                             isPlaying = state.isPlaying,
                             zoom = state.timelineZoom,
                             selection = state.selection,
-                            onSeek = { viewModel.seekTo(it) },
+                            onSeek = { viewModel.scrubTo(it) },
+                            onPauseForScrub = { viewModel.pausePlayback() },
                             onSelectMainClip = { viewModel.selectItem(SelectedItem.MainClipItem(it)) },
                             onSelectOverlay = { viewModel.selectItem(SelectedItem.OverlayItem(it)) },
                             onSelectAudio = { viewModel.selectItem(SelectedItem.AudioItem(it)) },
                             onSelectTransition = { viewModel.selectItem(SelectedItem.TransitionItem(it), InspectorTab.TRANSITION) },
+                            onSelectCaption = { viewModel.selectItem(SelectedItem.CaptionItem(it), InspectorTab.CAPTIONS) },
+                            onSelectFx = { viewModel.selectFxLayer(it) },
                             onTrimMainClip = { id, ds, de -> viewModel.trimMainClip(id, ds, de) },
                             onTrimOverlay = { id, s, d -> viewModel.trimOverlayTiming(id, s, d) },
                             onTrimAudio = { id, dt, ts, te -> viewModel.trimAudioClip(id, dt, ts, te) },
+                            onMoveCaption = { id, s, e -> viewModel.moveOrTrimCaption(id, s, e) },
+                            onMoveFx = { id, s, d -> viewModel.moveOrTrimFxLayer(id, s, d) },
                             modifier = Modifier.weight(if (state.activeInspector == InspectorTab.NONE) 0.52f else 0.34f)
                         )
 
@@ -454,50 +592,50 @@ fun EditorScreen(
                                     state = state,
                                     fonts = fonts,
                                     viewModel = viewModel,
-                                    onImportFont = {
-                                        pickFontFile.launch(
-                                            arrayOf("font/ttf", "font/otf", "application/x-font-ttf", "application/octet-stream", "*/*")
-                                        )
-                                    },
-                                    onImportCubeLut = {
-                                        pickCubeLutFile.launch(arrayOf("text/plain", "application/octet-stream", "*/*"))
-                                    },
-                                    onToggleVoiceover = onToggleVoiceover
+                                    compactDocked = false,
+                                    onImportFont = onImportFontAction,
+                                    onImportCubeLut = onImportCubeLutAction,
+                                    onImportSrt = onImportSrtAction,
+                                    onExportSrt = onExportSrtAction,
+                                    onPickCutoutBackground = onPickCutoutBgAction,
+                                    onToggleVoiceover = onToggleVoiceover,
+                                    onToggleOfflineMic = onToggleOfflineMic
                                 )
                             }
                         }
                     }
+
+                    // 3. Contextual Studio Bottom Tool Rail
+                    HorizontalDivider(color = BorderHairline)
+                    ContextualToolRail(
+                        state = state,
+                        onOpenProCamera = { viewModel.openProCamera() },
+                        onImportVideo = {
+                            pickMainVideos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                        },
+                        onImportPhoto = {
+                            pickMainPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        },
+                        onImportOverlayPhoto = {
+                            pickOverlayPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        },
+                        onImportOverlayVideo = {
+                            pickOverlayVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                        },
+                        onAddText = { viewModel.addTextOverlay() },
+                        onImportAudio = { pickAudioFile.launch(arrayOf("audio/*")) },
+                        onOpenInspector = { viewModel.openInspector(it) },
+                        onOpenTransitions = { viewModel.openTransitionsPicker() },
+                        onInsertFreezeFrame = { viewModel.insertFreezeFrameAtPlayhead() },
+                        onSplit = { viewModel.splitSelectedAtPlayhead() },
+                        onDuplicate = { viewModel.duplicateSelected() },
+                        onDelete = { viewModel.deleteSelected() },
+                        onReorderMainClip = { id, left -> viewModel.reorderMainClip(id, left) },
+                        onReorderOverlay = { id, up -> viewModel.reorderOverlayZ(id, up) },
+                        onClearSelection = { viewModel.selectItem(SelectedItem.None, InspectorTab.NONE) }
+                    )
                 }
             }
-
-            // 3. Contextual Studio Bottom Tool Rail
-            HorizontalDivider(color = BorderHairline)
-            ContextualToolRail(
-                state = state,
-                onOpenProCamera = { viewModel.openProCamera() },
-                onImportVideo = {
-                    pickMainVideos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
-                },
-                onImportPhoto = {
-                    pickMainPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                },
-                onImportOverlayPhoto = {
-                    pickOverlayPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                },
-                onImportOverlayVideo = {
-                    pickOverlayVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
-                },
-                onAddText = { viewModel.addTextOverlay() },
-                onImportAudio = { pickAudioFile.launch(arrayOf("audio/*")) },
-                onOpenInspector = { viewModel.openInspector(it) },
-                onOpenTransitions = { viewModel.openTransitionsPicker() },
-                onSplit = { viewModel.splitSelectedAtPlayhead() },
-                onDuplicate = { viewModel.duplicateSelected() },
-                onDelete = { viewModel.deleteSelected() },
-                onReorderMainClip = { id, left -> viewModel.reorderMainClip(id, left) },
-                onReorderOverlay = { id, up -> viewModel.reorderOverlayZ(id, up) },
-                onClearSelection = { viewModel.selectItem(SelectedItem.None, InspectorTab.NONE) }
-            )
         }
     }
 
@@ -586,6 +724,7 @@ private fun StudioTopBar(
     onBack: () -> Unit,
     onEditTitle: () -> Unit,
     onToggleAspect: () -> Unit,
+    onSwitchToLandscape: () -> Unit,
     onOpenProCamera: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
@@ -634,14 +773,26 @@ private fun StudioTopBar(
             }
 
             IconButton(
+                onClick = onSwitchToLandscape,
+                modifier = Modifier.size(34.dp).testTag("btn_toggle_orientation")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ScreenRotation,
+                    contentDescription = "Switch to Horizontal KineMaster Mode",
+                    tint = CinemaAmber,
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+
+            IconButton(
                 onClick = onOpenProCamera,
-                modifier = Modifier.size(36.dp).testTag("pro_camera_topbar_button")
+                modifier = Modifier.size(34.dp).testTag("pro_camera_topbar_button")
             ) {
                 Icon(
                     imageVector = Icons.Default.VideoCameraBack,
                     contentDescription = "Open Pro Cinema Camera",
                     tint = CinemaAmber,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(19.dp)
                 )
             }
 
@@ -651,7 +802,7 @@ private fun StudioTopBar(
                     .background(ActiveRail)
                     .border(1.dp, BorderHairline, RoundedCornerShape(7.dp))
                     .clickable { onToggleAspect() }
-                    .padding(horizontal = 7.dp, vertical = 5.dp)
+                    .padding(horizontal = 6.dp, vertical = 5.dp)
                     .testTag("aspect_ratio_pill")
             ) {
                 Text(text = aspectRatioLabel, style = MaterialTheme.typography.labelSmall, color = CinemaAmber)
@@ -845,9 +996,14 @@ private fun ActiveInspectorHost(
     state: EditorUiState,
     fonts: List<com.example.model.StudioFont>,
     viewModel: EditorViewModel,
+    compactDocked: Boolean = false,
     onImportFont: () -> Unit,
     onImportCubeLut: () -> Unit,
-    onToggleVoiceover: () -> Unit
+    onImportSrt: () -> Unit,
+    onExportSrt: () -> Unit,
+    onPickCutoutBackground: () -> Unit,
+    onToggleVoiceover: () -> Unit,
+    onToggleOfflineMic: () -> Unit
 ) {
     when (state.activeInspector) {
         InspectorTab.FILTERS -> {
@@ -932,6 +1088,8 @@ private fun ActiveInspectorHost(
             SpeedInspector(
                 clip = clip,
                 onUpdateSpeed = { spd, pitch, keep -> viewModel.updateSelectedClipSpeed(spd, pitch, keep) },
+                onInsertFreezeFrame = { viewModel.insertFreezeFrameAtPlayhead() },
+                onApplySpeedRamp = { viewModel.applySpeedRampPreset(it) },
                 onReset = { viewModel.resetSelectedClipSpeed() },
                 onClose = { viewModel.closeInspector() }
             )
@@ -944,11 +1102,141 @@ private fun ActiveInspectorHost(
             AudioMixerInspector(
                 trackLabel = label,
                 settings = settings,
+                canExtractAudio = audioClip == null && mainClip?.mediaType == MainMediaType.VIDEO,
                 isRecordingVoiceover = state.isRecordingVoiceover,
                 voiceoverLevel = state.voiceoverLevel,
                 voiceoverElapsedMs = state.voiceoverElapsedMs,
                 onToggleVoiceoverRecording = onToggleVoiceover,
+                onExtractAudio = { viewModel.extractAudioFromSelectedClip() },
+                onPreviewSfx = { viewModel.previewCinemaSfx(it) },
+                onInsertSfx = { viewModel.insertCinemaSfxAtPlayhead(it) },
                 onChange = { viewModel.updateSelectedAudioSettings(it) },
+                onClose = { viewModel.closeInspector() }
+            )
+        }
+        InspectorTab.MASK -> {
+            val overlay = state.selectedOverlay
+            val mainClip = state.selectedMainClip ?: state.timeline.mainClipAt(state.playheadMs)?.clip
+            val mask = overlay?.mask ?: mainClip?.mask ?: MaskSettings()
+            val label = overlay?.displayName?.ifBlank { "Overlay" } ?: mainClip?.displayName ?: "Clip"
+            MaskAndTransformInspector(
+                targetLabel = label,
+                mask = mask,
+                showClipTransformActions = overlay == null && mainClip != null,
+                clipTransform = mainClip?.baseTransform,
+                onUpdateMask = { viewModel.updateSelectedMask(it) },
+                onToggleMaskKeyframe = { viewModel.toggleSelectedMaskKeyframe() },
+                onFlipHorizontal = { viewModel.toggleClipFlip(horizontal = true) },
+                onFlipVertical = { viewModel.toggleClipFlip(horizontal = false) },
+                onRotate90 = { viewModel.rotateClip90() },
+                onClose = { viewModel.closeInspector() }
+            )
+        }
+        InspectorTab.VISUAL_FX -> {
+            VisualFxInspector(
+                fxLayers = state.timeline.fxLayers,
+                selectedFx = state.selectedFxLayer ?: state.timeline.fxLayers.firstOrNull(),
+                onAddFx = { type, fullFrame -> viewModel.addFxLayer(type, fullFrame) },
+                onSelectFx = { id -> viewModel.selectFxLayer(id) },
+                onUpdateFx = { transform -> viewModel.updateSelectedFxLayer(transform) },
+                onDeleteSelectedFx = { viewModel.deleteSelected() },
+                onClose = { viewModel.closeInspector() },
+                compactDocked = compactDocked
+            )
+        }
+        InspectorTab.TRANSFORM_CROP -> {
+            val overlay = state.selectedOverlay
+            val mainClip = state.selectedMainClip ?: state.timeline.mainClipAt(state.playheadMs)?.clip
+            val targetLabel = overlay?.displayName?.ifBlank { "Overlay" } ?: mainClip?.displayName ?: "Clip"
+            val currentTransform = if (overlay != null) {
+                ClipTransform(
+                    offsetX = overlay.offsetX,
+                    offsetY = overlay.offsetY,
+                    scale = overlay.scale,
+                    rotationDegrees = overlay.rotationDegrees,
+                    opacity = overlay.opacity,
+                    flipHorizontal = overlay.flipHorizontal,
+                    flipVertical = overlay.flipVertical,
+                    fullFrameFill = overlay.fullFrameFill,
+                    crop = overlay.crop
+                )
+            } else {
+                mainClip?.baseTransform ?: ClipTransform()
+            }
+            TransformCropZoomInspector(
+                targetLabel = targetLabel,
+                stageAspectRatio = state.aspectRatio.ratio,
+                transform = currentTransform,
+                panZoom = if (overlay == null) mainClip?.panZoom else null,
+                onUpdateTransform = { viewModel.updateSelectedGeometry(it) },
+                onUpdatePanZoom = if (overlay == null) { spec -> viewModel.updateSelectedClipPanZoom(spec) } else null,
+                onResetAll = { viewModel.resetSelectedGeometry() },
+                onClose = { viewModel.closeInspector() },
+                compactDocked = compactDocked
+            )
+        }
+        InspectorTab.CUTOUT -> {
+            val overlay = state.selectedOverlay
+            val mainClip = state.selectedMainClip ?: state.timeline.mainClipAt(state.playheadMs)?.clip
+            val targetLabel = overlay?.displayName?.ifBlank { "Overlay" } ?: mainClip?.displayName ?: "Clip"
+            val currentCutout = overlay?.aiCutout ?: mainClip?.aiCutout ?: AiCutoutSettings()
+            CutoutInspector(
+                targetLabel = targetLabel,
+                settings = currentCutout,
+                onUpdate = { viewModel.updateSelectedCutout(it) },
+                onPickCustomBackground = onPickCutoutBackground,
+                onClose = { viewModel.closeInspector() },
+                compactDocked = compactDocked
+            )
+        }
+        InspectorTab.CAPTIONS -> {
+            CaptionStudioInspector(
+                captions = state.timeline.captions,
+                selectedCaption = state.selectedCaption ?: state.timeline.captions.firstOrNull(),
+                safeZone = state.timeline.safeZoneOverlay,
+                availableFonts = fonts,
+                autoCaptionLoading = state.autoCaptionLoading,
+                autoCaptionStatus = state.autoCaptionStatus,
+                autoCaptionError = state.autoCaptionError,
+                isLiveMicDictating = state.isLiveMicDictating,
+                liveMicPartialText = state.liveMicPartialText,
+                onRunGeminiAutoCaptions = { lang -> viewModel.runGeminiAutoCaptions(lang) },
+                onToggleOfflineMicDictation = onToggleOfflineMic,
+                onAddCaption = { viewModel.addCaptionAtPlayhead() },
+                onSelectCaption = { id ->
+                    viewModel.selectItem(SelectedItem.CaptionItem(id), InspectorTab.CAPTIONS)
+                    state.timeline.captions.firstOrNull { it.id == id }?.let { viewModel.seekTo(it.startTimeMs) }
+                },
+                onUpdateCaption = { viewModel.updateSelectedCaption(it) },
+                onDeleteSelectedCaption = { viewModel.deleteSelected() },
+                onImportSrt = onImportSrt,
+                onExportSrt = onExportSrt,
+                onUpdateSafeZone = { viewModel.updateSafeZoneOverlay(it) },
+                onClose = { viewModel.closeInspector() },
+                compactDocked = compactDocked
+            )
+        }
+        InspectorTab.TEMPLATES -> {
+            LowerThirdTemplatesInspector(
+                availableFonts = fonts,
+                onInsertTemplate = { viewModel.insertLowerThirdTemplate(it) },
+                onClose = { viewModel.closeInspector() }
+            )
+        }
+        InspectorTab.AI_STUDIO -> {
+            AiCreativeStudioInspector(
+                aiIdeasLoading = state.aiIdeasLoading,
+                aiIdeasResult = state.aiIdeasResult,
+                aiIdeasError = state.aiIdeasError,
+                aiColoristLoading = state.aiColoristLoading,
+                aiColoristNote = state.aiColoristNote,
+                aiColoristError = state.aiColoristError,
+                aiCaptionsLoading = state.aiCaptionsLoading,
+                aiCaptionsError = state.aiCaptionsError,
+                onGenerateIdeas = { viewModel.generateAiHooksAndIdeas(it) },
+                onInsertHookOverlay = { viewModel.insertAiHookAsOverlay(it) },
+                onGenerateColorGrade = { viewModel.generateAiColorGrade(it) },
+                onGenerateCaptionsFromScript = { viewModel.generateAiCaptionsFromScript(it) },
                 onClose = { viewModel.closeInspector() }
             )
         }
@@ -996,7 +1284,11 @@ private fun ActiveInspectorHost(
         InspectorTab.CANVAS -> {
             CanvasAspectInspector(
                 current = state.aspectRatio,
+                backdrop = state.timeline.canvasBackdrop,
+                safeZone = state.timeline.safeZoneOverlay,
                 onSelect = { viewModel.updateAspectRatio(it) },
+                onUpdateBackdrop = { viewModel.updateCanvasBackdrop(it) },
+                onUpdateSafeZone = { viewModel.updateSafeZoneOverlay(it) },
                 onClose = { viewModel.closeInspector() }
             )
         }
@@ -1024,6 +1316,7 @@ private fun ContextualToolRail(
     onImportAudio: () -> Unit,
     onOpenInspector: (InspectorTab) -> Unit,
     onOpenTransitions: () -> Unit,
+    onInsertFreezeFrame: () -> Unit,
     onSplit: () -> Unit,
     onDuplicate: () -> Unit,
     onDelete: () -> Unit,
@@ -1044,6 +1337,14 @@ private fun ContextualToolRail(
             when (val sel = state.selection) {
                 is SelectedItem.None, is SelectedItem.TransitionItem -> {
                     ToolRailButton(
+                        icon = Icons.Default.AutoAwesome,
+                        label = "AI Studio",
+                        tint = CinemaAmber,
+                        isActive = state.activeInspector == InspectorTab.AI_STUDIO,
+                        onClick = { onOpenInspector(InspectorTab.AI_STUDIO) },
+                        testTag = "tool_ai_studio"
+                    )
+                    ToolRailButton(
                         icon = Icons.Default.VideoCameraBack,
                         label = "Pro Cam",
                         tint = CinemaAmber,
@@ -1063,6 +1364,54 @@ private fun ContextualToolRail(
                         tint = TrackVideoBlue,
                         onClick = onImportPhoto,
                         testTag = "tool_import_photo"
+                    )
+                    ToolRailButton(
+                        icon = Icons.Default.Subtitles,
+                        label = "Auto CC",
+                        tint = CinemaAmber,
+                        isActive = state.activeInspector == InspectorTab.CAPTIONS,
+                        onClick = { onOpenInspector(InspectorTab.CAPTIONS) },
+                        testTag = "tool_captions"
+                    )
+                    ToolRailButton(
+                        icon = Icons.Default.BlurOn,
+                        label = "FX Studio",
+                        tint = TrackFxViolet,
+                        isActive = state.activeInspector == InspectorTab.VISUAL_FX,
+                        onClick = { onOpenInspector(InspectorTab.VISUAL_FX) },
+                        testTag = "tool_visual_fx"
+                    )
+                    ToolRailButton(
+                        icon = Icons.Default.Transform,
+                        label = "Transform",
+                        tint = CinemaAmber,
+                        isActive = state.activeInspector == InspectorTab.TRANSFORM_CROP,
+                        onClick = { onOpenInspector(InspectorTab.TRANSFORM_CROP) },
+                        testTag = "tool_transform_crop"
+                    )
+                    ToolRailButton(
+                        icon = Icons.Default.AutoFixHigh,
+                        label = "Cutout",
+                        tint = TrackOverlayEmerald,
+                        isActive = state.activeInspector == InspectorTab.CUTOUT,
+                        onClick = { onOpenInspector(InspectorTab.CUTOUT) },
+                        testTag = "tool_cutout"
+                    )
+                    ToolRailButton(
+                        icon = Icons.Default.Style,
+                        label = "Templates",
+                        tint = TrackOverlayEmerald,
+                        isActive = state.activeInspector == InspectorTab.TEMPLATES,
+                        onClick = { onOpenInspector(InspectorTab.TEMPLATES) },
+                        testTag = "tool_templates"
+                    )
+                    ToolRailButton(
+                        icon = Icons.Default.Crop,
+                        label = "Mask",
+                        tint = TrackVideoBlue,
+                        isActive = state.activeInspector == InspectorTab.MASK,
+                        onClick = { onOpenInspector(InspectorTab.MASK) },
+                        testTag = "tool_mask"
                     )
                     ToolRailButton(
                         icon = Icons.Default.AutoFixHigh,
@@ -1091,6 +1440,14 @@ private fun ContextualToolRail(
                         tint = TrackAudioRose,
                         onClick = onImportAudio,
                         testTag = "tool_import_audio"
+                    )
+                    ToolRailButton(
+                        icon = Icons.Default.GraphicEq,
+                        label = "Voice/Mix",
+                        tint = TrackAudioRose,
+                        isActive = state.activeInspector == InspectorTab.AUDIO,
+                        onClick = { onOpenInspector(InspectorTab.AUDIO) },
+                        testTag = "tool_audio_mixer"
                     )
                     ToolRailButton(
                         icon = Icons.Default.Compare,
@@ -1149,12 +1506,18 @@ private fun ContextualToolRail(
                 is SelectedItem.MainClipItem -> {
                     ToolRailButton(icon = Icons.AutoMirrored.Filled.ArrowBack, label = "Done", onClick = onClearSelection)
                     ToolRailButton(icon = Icons.Default.ContentCut, label = "Split", tint = CinemaAmber, onClick = onSplit, testTag = "clip_split_button")
+                    ToolRailButton(icon = Icons.Default.Transform, label = "Crop/Zoom", tint = CinemaAmber, isActive = state.activeInspector == InspectorTab.TRANSFORM_CROP, onClick = { onOpenInspector(InspectorTab.TRANSFORM_CROP) }, testTag = "clip_transform_crop_button")
+                    ToolRailButton(icon = Icons.Default.BlurOn, label = "FX", tint = TrackFxViolet, isActive = state.activeInspector == InspectorTab.VISUAL_FX, onClick = { onOpenInspector(InspectorTab.VISUAL_FX) }, testTag = "clip_fx_button")
+                    ToolRailButton(icon = Icons.Default.AutoFixHigh, label = "Cutout", tint = TrackOverlayEmerald, isActive = state.activeInspector == InspectorTab.CUTOUT, onClick = { onOpenInspector(InspectorTab.CUTOUT) }, testTag = "clip_cutout_button")
+                    ToolRailButton(icon = Icons.Default.GraphicEq, label = "Voice/Mix", tint = TrackAudioRose, isActive = state.activeInspector == InspectorTab.AUDIO, onClick = { onOpenInspector(InspectorTab.AUDIO) }, testTag = "clip_audio_button")
+                    ToolRailButton(icon = Icons.Default.Subtitles, label = "Auto CC", tint = CinemaAmber, isActive = state.activeInspector == InspectorTab.CAPTIONS, onClick = { onOpenInspector(InspectorTab.CAPTIONS) }, testTag = "clip_captions_button")
+                    ToolRailButton(icon = Icons.Default.Crop, label = "Mask", tint = TrackVideoBlue, isActive = state.activeInspector == InspectorTab.MASK, onClick = { onOpenInspector(InspectorTab.MASK) }, testTag = "clip_mask_button")
+                    ToolRailButton(icon = Icons.Default.AcUnit, label = "Freeze", tint = CinemaAmber, onClick = onInsertFreezeFrame, testTag = "clip_freeze_button")
                     ToolRailButton(icon = Icons.Default.Animation, label = "Motion", tint = TrackOverlayEmerald, isActive = state.activeInspector == InspectorTab.KEYFRAMES, onClick = { onOpenInspector(InspectorTab.KEYFRAMES) }, testTag = "clip_keyframes_button")
                     ToolRailButton(icon = Icons.Default.Speed, label = "Speed", tint = TrackAudioRose, isActive = state.activeInspector == InspectorTab.SPEED, onClick = { onOpenInspector(InspectorTab.SPEED) }, testTag = "clip_speed_button")
                     ToolRailButton(icon = Icons.Default.Compare, label = "Transition", tint = CinemaAmber, isActive = state.activeInspector == InspectorTab.TRANSITION, onClick = onOpenTransitions, testTag = "clip_transition_button")
                     ToolRailButton(icon = Icons.Default.AutoAwesome, label = "Filters", isActive = state.activeInspector == InspectorTab.FILTERS, onClick = { onOpenInspector(InspectorTab.FILTERS) })
                     ToolRailButton(icon = Icons.Default.Tune, label = "Color", isActive = state.activeInspector == InspectorTab.ADJUST, onClick = { onOpenInspector(InspectorTab.ADJUST) }, testTag = "clip_color_button")
-                    ToolRailButton(icon = Icons.Default.GraphicEq, label = "Audio", isActive = state.activeInspector == InspectorTab.AUDIO, onClick = { onOpenInspector(InspectorTab.AUDIO) })
                     ToolRailButton(icon = Icons.Default.ChevronLeft, label = "Move ◀", onClick = { onReorderMainClip(sel.clipId, true) })
                     ToolRailButton(icon = Icons.Default.ChevronRight, label = "Move ▶", onClick = { onReorderMainClip(sel.clipId, false) })
                     ToolRailButton(icon = Icons.Default.ContentCopy, label = "Copy", onClick = onDuplicate)
@@ -1170,6 +1533,7 @@ private fun ContextualToolRail(
                     }
                     ToolRailButton(icon = Icons.AutoMirrored.Filled.ArrowBack, label = "Done", onClick = onClearSelection)
                     ToolRailButton(icon = Icons.Default.ContentCut, label = "Split", tint = CinemaAmber, onClick = onSplit, testTag = "overlay_split_button")
+                    ToolRailButton(icon = Icons.Default.Transform, label = "Transform", tint = CinemaAmber, isActive = state.activeInspector == InspectorTab.TRANSFORM_CROP, onClick = { onOpenInspector(InspectorTab.TRANSFORM_CROP) }, testTag = "overlay_transform_button")
                     ToolRailButton(
                         icon = when (overlayType) {
                             OverlayType.TEXT -> Icons.Default.TextFields
@@ -1190,6 +1554,8 @@ private fun ContextualToolRail(
                             OverlayType.IMAGE -> "overlay_image_style_button"
                         }
                     )
+                    ToolRailButton(icon = Icons.Default.AutoFixHigh, label = "Cutout", tint = TrackOverlayEmerald, isActive = state.activeInspector == InspectorTab.CUTOUT, onClick = { onOpenInspector(InspectorTab.CUTOUT) }, testTag = "overlay_cutout_button")
+                    ToolRailButton(icon = Icons.Default.Crop, label = "Mask", tint = TrackVideoBlue, isActive = state.activeInspector == InspectorTab.MASK, onClick = { onOpenInspector(InspectorTab.MASK) }, testTag = "overlay_mask_button")
                     ToolRailButton(icon = Icons.Default.ChevronLeft, label = "Back Z", onClick = { onReorderOverlay(sel.overlayId, false) })
                     ToolRailButton(icon = Icons.Default.ChevronRight, label = "Front Z", onClick = { onReorderOverlay(sel.overlayId, true) })
                     ToolRailButton(icon = Icons.Default.ContentCopy, label = "Copy", onClick = onDuplicate)
@@ -1201,13 +1567,54 @@ private fun ContextualToolRail(
                     ToolRailButton(icon = Icons.Default.ContentCut, label = "Split", tint = CinemaAmber, onClick = onSplit, testTag = "audio_split_button")
                     ToolRailButton(
                         icon = Icons.Default.GraphicEq,
-                        label = "Mixer",
+                        label = "Voice/Mix",
                         tint = TrackAudioRose,
                         isActive = state.activeInspector == InspectorTab.AUDIO,
                         onClick = { onOpenInspector(InspectorTab.AUDIO) }
                     )
+                    ToolRailButton(
+                        icon = Icons.Default.Subtitles,
+                        label = "Auto CC",
+                        tint = CinemaAmber,
+                        isActive = state.activeInspector == InspectorTab.CAPTIONS,
+                        onClick = { onOpenInspector(InspectorTab.CAPTIONS) }
+                    )
                     ToolRailButton(icon = Icons.Default.ContentCopy, label = "Copy", onClick = onDuplicate)
                     ToolRailButton(icon = Icons.Default.DeleteOutline, label = "Delete", tint = ErrorCrimson, onClick = onDelete)
+                }
+
+                is SelectedItem.CaptionItem -> {
+                    ToolRailButton(icon = Icons.AutoMirrored.Filled.ArrowBack, label = "Done", onClick = onClearSelection)
+                    ToolRailButton(
+                        icon = Icons.Default.Subtitles,
+                        label = "Edit CC",
+                        tint = CinemaAmber,
+                        isActive = state.activeInspector == InspectorTab.CAPTIONS,
+                        onClick = { onOpenInspector(InspectorTab.CAPTIONS) },
+                        testTag = "caption_edit_button"
+                    )
+                    ToolRailButton(
+                        icon = Icons.Default.AutoAwesome,
+                        label = "AI Studio",
+                        tint = CinemaAmber,
+                        isActive = state.activeInspector == InspectorTab.AI_STUDIO,
+                        onClick = { onOpenInspector(InspectorTab.AI_STUDIO) }
+                    )
+                    ToolRailButton(icon = Icons.Default.DeleteOutline, label = "Delete", tint = ErrorCrimson, onClick = onDelete, testTag = "caption_delete_button")
+                }
+
+                is SelectedItem.FxItem -> {
+                    ToolRailButton(icon = Icons.AutoMirrored.Filled.ArrowBack, label = "Done", onClick = onClearSelection)
+                    ToolRailButton(
+                        icon = Icons.Default.BlurOn,
+                        label = "Edit FX",
+                        tint = TrackFxViolet,
+                        isActive = state.activeInspector == InspectorTab.VISUAL_FX,
+                        onClick = { onOpenInspector(InspectorTab.VISUAL_FX) },
+                        testTag = "fx_edit_button"
+                    )
+                    ToolRailButton(icon = Icons.Default.ContentCopy, label = "Copy", onClick = onDuplicate, testTag = "fx_duplicate_button")
+                    ToolRailButton(icon = Icons.Default.DeleteOutline, label = "Delete", tint = ErrorCrimson, onClick = onDelete, testTag = "fx_delete_button")
                 }
             }
         }
