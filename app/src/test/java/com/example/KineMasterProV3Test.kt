@@ -263,4 +263,14 @@ class KineMasterProV3Test {
         assertEquals(CutoutBackgroundMode.GAUSSIAN_BLUR, afterCutout.timeline.mainClips.first().aiCutout.backgroundMode)
         assertEquals(initial, cutoutCmd.undo(afterCutout))
     }
+
+    @Test
+    fun safeZoneOverlay_includesYouTubePreset() {
+        val labels = com.example.model.SafeZoneOverlay.entries.map { it.label }
+        assertTrue(labels.contains("YouTube"))
+        assertTrue(labels.contains("TikTok"))
+        assertTrue(labels.contains("Reels"))
+        assertTrue(labels.contains("Shorts"))
+        assertEquals("YouTube", com.example.model.SafeZoneOverlay.YOUTUBE.label)
+    }
 }

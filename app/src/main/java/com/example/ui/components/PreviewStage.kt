@@ -1771,36 +1771,60 @@ private fun SafeZoneGuideOverlay(zone: SafeZoneOverlay) {
         SafeZoneOverlay.TIKTOK -> 0.13f
         SafeZoneOverlay.REELS -> 0.12f
         SafeZoneOverlay.SHORTS -> 0.11f
+        SafeZoneOverlay.YOUTUBE -> 0.10f
         SafeZoneOverlay.NONE -> 0f
     }
     val bottomFrac = when (zone) {
         SafeZoneOverlay.TIKTOK -> 0.24f
         SafeZoneOverlay.REELS -> 0.22f
         SafeZoneOverlay.SHORTS -> 0.21f
+        SafeZoneOverlay.YOUTUBE -> 0.17f
         SafeZoneOverlay.NONE -> 0f
+    }
+    val leftRailFrac = when (zone) {
+        SafeZoneOverlay.YOUTUBE -> 0.05f
+        else -> 0f
     }
     val rightRailFrac = when (zone) {
         SafeZoneOverlay.TIKTOK -> 0.17f
         SafeZoneOverlay.REELS -> 0.15f
         SafeZoneOverlay.SHORTS -> 0.16f
+        SafeZoneOverlay.YOUTUBE -> 0.06f
         SafeZoneOverlay.NONE -> 0f
     }
     Box(modifier = Modifier.fillMaxSize().testTag("safe_zone_hud_${zone.name.lowercase()}")) {
         Canvas(modifier = Modifier.fillMaxSize()) {
             val topY = size.height * topFrac
             val bottomY = size.height * (1f - bottomFrac)
+            val leftX = size.width * leftRailFrac
             val rightX = size.width * (1f - rightRailFrac)
             val tint = Color(0xFFEF4444).copy(alpha = 0.16f)
             val dash = PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f)
 
             drawRect(tint, Offset.Zero, Size(size.width, topY))
             drawRect(tint, Offset(0f, bottomY), Size(size.width, size.height - bottomY))
-            drawRect(tint, Offset(rightX, topY), Size(size.width - rightX, bottomY - topY))
+            if (leftX > 0f) {
+                drawRect(tint, Offset(0f, topY), Size(leftX, (bottomY - topY).coerceAtLeast(0f)))
+            }
+            drawRect(tint, Offset(rightX, topY), Size(size.width - rightX, (bottomY - topY).coerceAtLeast(0f)))
 
+            // YouTube bottom-right channel watermark / end-card corner reserve
+            if (zone == SafeZoneOverlay.YOUTUBE) {
+                val wmW = size.width * 0.10f
+                val wmH = size.height * 0.11f
+                drawRect(
+                    color = Color(0xFFEF4444).copy(alpha = 0.24f),
+                    topLeft = Offset((rightX - wmW).coerceAtLeast(leftX), (bottomY - wmH).coerceAtLeast(topY)),
+                    size = Size(wmW, wmH)
+                )
+            }
+
+            val boxLeft = (leftX + if (leftX > 0f) 0f else 8f)
+            val boxWidth = (rightX - boxLeft - if (leftX > 0f) 0f else 4f).coerceAtLeast(10f)
             drawRect(
                 color = CinemaAmber.copy(alpha = 0.75f),
-                topLeft = Offset(8f, topY),
-                size = Size((rightX - 12f).coerceAtLeast(10f), (bottomY - topY).coerceAtLeast(10f)),
+                topLeft = Offset(boxLeft, topY),
+                size = Size(boxWidth, (bottomY - topY).coerceAtLeast(10f)),
                 style = Stroke(width = 1.5.dp.toPx(), pathEffect = dash)
             )
         }

@@ -2431,6 +2431,7 @@ class EditorViewModel(
             val frame = captureCurrentPlayheadFrame()
             val tl = _uiState.value.timeline
             val result = GeminiColoristService.generateHooksAndEditIdeas(
+                context = appContext,
                 frameBitmap = frame,
                 topic = topic,
                 clipCount = tl.mainClips.size,
@@ -2497,6 +2498,7 @@ class EditorViewModel(
             _uiState.update { it.copy(aiColoristLoading = true, aiColoristError = null, aiColoristNote = null) }
             val frame = captureCurrentPlayheadFrame()
             val result = GeminiColoristService.generateColorGrade(
+                context = appContext,
                 frameBitmap = frame,
                 prompt = prompt,
                 currentAdjustments = clip.colorAdjustments
@@ -2530,6 +2532,7 @@ class EditorViewModel(
             val startAt = state.playheadMs.coerceAtLeast(0L)
             val targetDur = (state.timeline.totalDurationMs - startAt).coerceAtLeast(4000L)
             val result = GeminiColoristService.generateTimedCaptionsFromScript(
+                context = appContext,
                 script = script,
                 startAtMs = startAt,
                 targetDurationMs = targetDur
@@ -2968,6 +2971,7 @@ class EditorViewModel(
                 }
 
                 val result = GeminiColoristService.transcribeAudioToCaptions(
+                    context = appContext,
                     audioBytes = extracted.bytes,
                     mimeType = extracted.mimeType,
                     clipStartOnTimelineMs = target.timelineStartMs,

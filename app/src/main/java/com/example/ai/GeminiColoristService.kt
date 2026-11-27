@@ -1,16 +1,21 @@
 package com.example.ai
 
+import android.content.Context
 import android.graphics.Bitmap
+import android.util.Log
 import com.example.model.CaptionAnimationPreset
 import com.example.model.CaptionClip
 import com.example.model.ColorAdjustments
 import com.example.model.ColorWheelOffset
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
+import com.google.firebase.ai.GenerativeModel
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
@@ -30,11 +35,13 @@ data class AiCreativeIdeasResult(
  * Firebase AI Logic service powering LumaCut's Gemini AI Studio:
  * - AI Colorist (multimodal frame + prompt -> color wheels & primaries)
  * - AI Smart Script Captions (script -> timed karaoke CaptionClip blocks)
+ * - AI Audio Auto Captions (multimodal audio track -> synced subtitle segments)
  * - AI Hooks, Viral Titles & Smart Edit Ideas
  * Uses `gemini-3.8-flash` with strict JSON Schema output and App Check attestation.
  */
 object GeminiColoristService {
 
+    private const val TAG = "GeminiColoristService"
     private const val MODEL_NAME = "gemini-3.8-flash"
     private const val REQUEST_TIMEOUT_MS = 60_000L
 
@@ -97,28 +104,6 @@ object GeminiColoristService {
         )
     )
 
-    private val coloristModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = MODEL_NAME,
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = colorGradeSchema
-                temperature = 0.55f
-            }
-        )
-    }
-
-    private val captionModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = MODEL_NAME,
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = timedCaptionsSchema
-                temperature = 0.3f
-            }
-        )
-    }
-
     private val audioTranscriptionSchema = Schema.obj(
         properties = mapOf(
             "segments" to Schema.array(
@@ -134,8 +119,34 @@ object GeminiColoristService {
         )
     )
 
-    private val ideasModel by lazy {
-        Firebase.ai.generativeModel(
+    private fun requireFirebaseApp(context: Context): FirebaseApp =
+        ensureFirebaseReady(context)
+            ?: throw IllegalStateException(
+                "Firebase AI is not configured in this build. Use Offline Mic dictation or rebuild with google-services.json."
+            )
+
+    private fun coloristModel(app: FirebaseApp): GenerativeModel =
+        Firebase.ai(app = app).generativeModel(
+            modelName = MODEL_NAME,
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = colorGradeSchema
+                temperature = 0.55f
+            }
+        )
+
+    private fun captionModel(app: FirebaseApp): GenerativeModel =
+        Firebase.ai(app = app).generativeModel(
+            modelName = MODEL_NAME,
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = timedCaptionsSchema
+                temperature = 0.3f
+            }
+        )
+
+    private fun ideasModel(app: FirebaseApp): GenerativeModel =
+        Firebase.ai(app = app).generativeModel(
             modelName = MODEL_NAME,
             generationConfig = generationConfig {
                 responseMimeType = "application/json"
@@ -143,10 +154,9 @@ object GeminiColoristService {
                 temperature = 0.7f
             }
         )
-    }
 
-    private val audioTranscriptionModel by lazy {
-        Firebase.ai.generativeModel(
+    private fun audioTranscriptionModel(app: FirebaseApp): GenerativeModel =
+        Firebase.ai(app = app).generativeModel(
             modelName = MODEL_NAME,
             generationConfig = generationConfig {
                 responseMimeType = "application/json"
@@ -154,9 +164,9 @@ object GeminiColoristService {
                 temperature = 0.2f
             }
         )
-    }
 
     suspend fun generateColorGrade(
+        context: Context,
         frameBitmap: Bitmap?,
         prompt: String,
         currentAdjustments: ColorAdjustments
@@ -167,6 +177,7 @@ object GeminiColoristService {
         }
 
         return try {
+            val app = requireFirebaseApp(context)
             val scaledFrame = frameBitmap?.let { scaleForVision(it, maxDim = 640) }
             val instruction = buildString {
                 append("You are a senior DaVinci Resolve feature-film colorist. ")
@@ -182,7 +193,7 @@ object GeminiColoristService {
                     }
                     text(instruction)
                 }
-                coloristModel.generateContent(inputContent)
+                coloristModel(app).generateContent(inputContent)
             }
 
             val rawJson = response.text?.trim()
@@ -217,14 +228,19 @@ object GeminiColoristService {
             )
             val note = json.optString("coloristNote", "Applied custom AI color grade.")
             Result.success(AiColorGradeResult(newAdjustments, note))
+        } catch (te: TimeoutCancellationException) {
+            Log.e(TAG, "AI Colorist timed out", te)
+            Result.failure(IllegalStateException("AI Colorist timed out after 60s. Please retry."))
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: Exception) {
+            Log.e(TAG, "AI Colorist failed", e)
             Result.failure(e)
         }
     }
 
     suspend fun generateTimedCaptionsFromScript(
+        context: Context,
         script: String,
         startAtMs: Long,
         targetDurationMs: Long
@@ -235,15 +251,16 @@ object GeminiColoristService {
         }
 
         return try {
+            val app = requireFirebaseApp(context)
             val prompt = buildString {
-                append("Split the following video voiceover script into punchy short-form Reels/Shorts subtitle blocks ")
+                append("Split the following video voiceover script into punchy short-form Reels/Shorts/YouTube subtitle blocks ")
                 append("of 3 to 6 words each with realistic speaking durations in milliseconds. ")
                 append("Target total duration is roughly ${targetDurationMs.coerceAtLeast(3000L)} ms.\n\n")
                 append("Script:\n$cleaned")
             }
 
             val response = withTimeout(REQUEST_TIMEOUT_MS) {
-                captionModel.generateContent(prompt)
+                captionModel(app).generateContent(prompt)
             }
             val rawJson = response.text?.trim()
                 ?: return Result.failure(IllegalStateException("Gemini returned an empty captions response."))
@@ -274,14 +291,19 @@ object GeminiColoristService {
             } else {
                 Result.success(clips)
             }
+        } catch (te: TimeoutCancellationException) {
+            Log.e(TAG, "Script captions timed out", te)
+            Result.failure(IllegalStateException("AI script captioning timed out after 60s. Please retry."))
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: Exception) {
+            Log.e(TAG, "Script captions failed", e)
             Result.failure(e)
         }
     }
 
     suspend fun generateHooksAndEditIdeas(
+        context: Context,
         frameBitmap: Bitmap?,
         topic: String,
         clipCount: Int,
@@ -293,10 +315,11 @@ object GeminiColoristService {
         }
 
         return try {
+            val app = requireFirebaseApp(context)
             val scaledFrame = frameBitmap?.let { scaleForVision(it, maxDim = 640) }
             val seconds = (durationMs / 1000L).coerceAtLeast(1L)
             val instruction = buildString {
-                append("You are an expert short-form video director and editor for Reels, TikTok, and YouTube Shorts. ")
+                append("You are an expert short-form video director and editor for Reels, TikTok, and YouTube. ")
                 append("The creator's current timeline has $clipCount clip(s) totaling ~${seconds}s. ")
                 if (trimmed.isNotEmpty()) {
                     append("Video topic / vibe: \"$trimmed\". ")
@@ -314,7 +337,7 @@ object GeminiColoristService {
                     }
                     text(instruction)
                 }
-                ideasModel.generateContent(inputContent)
+                ideasModel(app).generateContent(inputContent)
             }
 
             val rawJson = response.text?.trim()
@@ -339,14 +362,19 @@ object GeminiColoristService {
             } else {
                 Result.success(result)
             }
+        } catch (te: TimeoutCancellationException) {
+            Log.e(TAG, "Creative ideas timed out", te)
+            Result.failure(IllegalStateException("AI Creative Studio timed out after 60s. Please retry."))
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: Exception) {
+            Log.e(TAG, "Creative ideas failed", e)
             Result.failure(e)
         }
     }
 
     suspend fun transcribeAudioToCaptions(
+        context: Context,
         audioBytes: ByteArray,
         mimeType: String,
         clipStartOnTimelineMs: Long,
@@ -359,8 +387,9 @@ object GeminiColoristService {
         }
 
         return try {
+            val app = requireFirebaseApp(context)
             val langInstruction = if (languageHint.equals("Auto", ignoreCase = true) || languageHint.isBlank()) {
-                "Detect the spoken language automatically and transcribe in that language."
+                "Detect the spoken language automatically and transcribe naturally in that language."
             } else {
                 "Transcribe the spoken audio in $languageHint."
             }
@@ -377,7 +406,7 @@ object GeminiColoristService {
                     inlineData(audioBytes, mimeType)
                     text(prompt)
                 }
-                audioTranscriptionModel.generateContent(inputContent)
+                audioTranscriptionModel(app).generateContent(inputContent)
             }
 
             val rawJson = response.text?.trim()
@@ -412,9 +441,13 @@ object GeminiColoristService {
             } else {
                 Result.success(clips.sortedBy { it.startTimeMs })
             }
+        } catch (te: TimeoutCancellationException) {
+            Log.e(TAG, "Audio transcription timed out", te)
+            Result.failure(IllegalStateException("AI transcription timed out after 60s. Try a shorter clip or retry."))
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: Exception) {
+            Log.e(TAG, "Audio transcription failed", e)
             Result.failure(e)
         }
     }

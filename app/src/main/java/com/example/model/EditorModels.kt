@@ -76,7 +76,8 @@ enum class SafeZoneOverlay(val label: String) {
     NONE("Off"),
     TIKTOK("TikTok"),
     REELS("Reels"),
-    SHORTS("Shorts")
+    SHORTS("Shorts"),
+    YOUTUBE("YouTube")
 }
 
 enum class CanvasBackdropMode(val displayName: String) {

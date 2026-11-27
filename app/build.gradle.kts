@@ -80,6 +80,48 @@ secrets {
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
+// Mirror google-services.json into generated assets (when present) as a defensive runtime fallback
+// if StringResourceValueReader fails to resolve google_app_id on certain OEM/split APK environments.
+abstract class CopyFirebaseFallbackAssetTask : DefaultTask() {
+  @get:InputFile
+  @get:Optional
+  @get:PathSensitive(PathSensitivity.RELATIVE)
+  abstract val googleServicesFile: RegularFileProperty
+
+  @get:OutputDirectory
+  abstract val outputDir: DirectoryProperty
+
+  @TaskAction
+  fun copyConfig() {
+    val outDir = outputDir.get().asFile
+    outDir.mkdirs()
+    val src = googleServicesFile.orNull?.asFile
+    val dst = File(outDir, "firebase_client_config.json")
+    if (src != null && src.exists()) {
+      src.copyTo(dst, overwrite = true)
+    } else if (dst.exists()) {
+      dst.delete()
+    }
+  }
+}
+
+androidComponents {
+  onVariants { variant ->
+    val gsFile = layout.projectDirectory.file("google-services.json")
+    val taskProvider = tasks.register<CopyFirebaseFallbackAssetTask>(
+      "copy${variant.name.replaceFirstChar { it.uppercase() }}FirebaseFallbackAsset"
+    ) {
+      if (gsFile.asFile.exists()) {
+        googleServicesFile.set(gsFile)
+      }
+    }
+    variant.sources.assets?.addGeneratedSourceDirectory(
+      taskProvider,
+      CopyFirebaseFallbackAssetTask::outputDir
+    )
+  }
+}
+
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {

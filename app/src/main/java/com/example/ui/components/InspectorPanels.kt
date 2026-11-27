@@ -1104,6 +1104,7 @@ fun CanvasAspectInspector(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 14.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -1111,7 +1112,6 @@ fun CanvasAspectInspector(
                     val picked = zone == safeZone
                     Box(
                         modifier = Modifier
-                            .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
                             .background(if (picked) AmberContainer else ActiveRail)
                             .border(
@@ -1120,14 +1120,15 @@ fun CanvasAspectInspector(
                                 shape = RoundedCornerShape(8.dp)
                             )
                             .clickable { onUpdateSafeZone(zone) }
-                            .padding(vertical = 7.dp)
+                            .padding(horizontal = 12.dp, vertical = 7.dp)
                             .testTag("canvas_safe_zone_${zone.name.lowercase()}"),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
                             text = zone.label,
                             style = MaterialTheme.typography.labelMedium,
-                            color = if (picked) CinemaAmber else ChalkWhite
+                            color = if (picked) CinemaAmber else ChalkWhite,
+                            maxLines = 1
                         )
                     }
                 }
