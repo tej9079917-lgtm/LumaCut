@@ -1,10 +1,17 @@
 package com.example
 
 import android.speech.SpeechRecognizer
+import com.example.ai.CaptionOutputMode
+import com.example.ai.GeminiColoristService
 import com.example.automation.EditorAutomationBridge
 import com.example.automation.LocalMcpJsonRpcServer
+import com.example.media.DiagnosticHealth
 import com.example.media.OfflineLanguageCatalog
 import com.example.media.OfflineSpeechModelManager
+import com.example.media.OnlineVoiceCloneTtsEngine
+import com.example.media.PhoneticTransliterator
+import com.example.media.SpeechServicesDiagnosticEngine
+import com.example.media.TeluguRegistrationState
 import com.example.model.ExportConfig
 import com.example.model.ExportResolution
 import com.example.model.ExportVideoCodec
@@ -131,5 +138,100 @@ class StudioV5ProSuiteTest {
         )
         assertTrue(cannotCheckMsg.contains("Enable Google Speech"))
         assertTrue(cannotCheckMsg.contains("code 14"))
+    }
+
+    @Test
+    fun speechServicesDiagnostic_detectsTeluguInstalledOnlineOnlyAndDisabledStates() {
+        val healthy = SpeechServicesDiagnosticEngine.buildReport(
+            apiLevel = 34,
+            googleSpeechInstalled = true,
+            googleSpeechEnabled = true,
+            googleSpeechVersion = "2026.05",
+            hasFallbackGoogleSpeechHost = true,
+            registeredServiceCount = 2,
+            isSystemAvailable = true,
+            isOnDeviceAvailable = true,
+            installedLanguages = listOf("en-US", "te-IN"),
+            pendingLanguages = emptyList(),
+            supportedOfflineLanguages = listOf("hi-IN"),
+            onlineLanguages = listOf("te-IN")
+        )
+        assertEquals(DiagnosticHealth.HEALTHY, healthy.overallHealth)
+        assertEquals(TeluguRegistrationState.INSTALLED_OFFLINE, healthy.teluguState)
+        assertTrue(healthy.teluguStatusMessage.contains("te-IN"))
+
+        val onlineOnly = SpeechServicesDiagnosticEngine.buildReport(
+            apiLevel = 34,
+            googleSpeechInstalled = true,
+            googleSpeechEnabled = true,
+            googleSpeechVersion = "2026.05",
+            hasFallbackGoogleSpeechHost = true,
+            registeredServiceCount = 1,
+            isSystemAvailable = true,
+            isOnDeviceAvailable = true,
+            installedLanguages = listOf("en-US"),
+            pendingLanguages = emptyList(),
+            supportedOfflineLanguages = listOf("hi-IN"),
+            onlineLanguages = listOf("te-IN")
+        )
+        assertEquals(DiagnosticHealth.WARNING, onlineOnly.overallHealth)
+        assertEquals(TeluguRegistrationState.ONLINE_ONLY_REGISTERED, onlineOnly.teluguState)
+
+        val disabled = SpeechServicesDiagnosticEngine.buildReport(
+            apiLevel = 34,
+            googleSpeechInstalled = false,
+            googleSpeechEnabled = false,
+            googleSpeechVersion = "Not installed",
+            hasFallbackGoogleSpeechHost = false,
+            registeredServiceCount = 0,
+            isSystemAvailable = false,
+            isOnDeviceAvailable = false,
+            installedLanguages = emptyList(),
+            pendingLanguages = emptyList(),
+            supportedOfflineLanguages = emptyList(),
+            onlineLanguages = emptyList()
+        )
+        assertEquals(DiagnosticHealth.ACTION_REQUIRED, disabled.overallHealth)
+        assertEquals(TeluguRegistrationState.SERVICE_UNAVAILABLE, disabled.teluguState)
+    }
+
+    @Test
+    fun phoneticTransliterator_convertsTeluguAndHindiToReadablePhoneticEnglish() {
+        val teluguWord = PhoneticTransliterator.toPhoneticEnglish("తెలుగు")
+        assertEquals("Telugu", teluguWord)
+
+        val teluguGreeting = PhoneticTransliterator.toPhoneticEnglish("నమస్కారం")
+        assertTrue("Expected phonetic Telugu greeting, got $teluguGreeting", teluguGreeting.equals("Namaskaram", ignoreCase = true))
+
+        val alreadyEnglish = PhoneticTransliterator.toPhoneticEnglish("Hello LumaCut 4K")
+        assertEquals("Hello LumaCut 4K", alreadyEnglish)
+    }
+
+    @Test
+    fun captionOutputModes_generateTranslationAndPhoneticInstructions() {
+        val translatePrompt = GeminiColoristService.buildCaptionOutputPromptInstruction(
+            sourceLangDesc = "the spoken audio is in Telugu",
+            outputMode = CaptionOutputMode.TRANSLATE,
+            targetOutputLanguage = "Japanese"
+        )
+        assertTrue(translatePrompt.contains("TRANSLATE"))
+        assertTrue(translatePrompt.contains("Japanese"))
+
+        val phoneticPrompt = GeminiColoristService.buildCaptionOutputPromptInstruction(
+            sourceLangDesc = "the spoken audio is in Telugu",
+            outputMode = CaptionOutputMode.PHONETIC_ENGLISH,
+            targetOutputLanguage = "English"
+        )
+        assertTrue(phoneticPrompt.contains("DO NOT translate"))
+        assertTrue(phoneticPrompt.contains("phonetically"))
+    }
+
+    @Test
+    fun onlineVoiceCloneEndpointValidation_blocksCleartextAndPrivateHosts() {
+        assertTrue(OnlineVoiceCloneTtsEngine.validateCustomHttpsEndpoint("https://api.elevenlabs.io/v1/text-to-speech").isSuccess)
+        assertTrue(OnlineVoiceCloneTtsEngine.validateCustomHttpsEndpoint("http://api.example.com/v1/audio/speech").isFailure)
+        assertTrue(OnlineVoiceCloneTtsEngine.validateCustomHttpsEndpoint("https://127.0.0.1/v1/audio/speech").isFailure)
+        assertTrue(OnlineVoiceCloneTtsEngine.validateCustomHttpsEndpoint("https://169.254.169.254/latest/meta-data").isFailure)
+        assertTrue(OnlineVoiceCloneTtsEngine.validateCustomHttpsEndpoint("https://localhost:8080/tts").isFailure)
     }
 }

@@ -57,6 +57,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.ai.CaptionOutputMode
 import com.example.media.FontResolver
 import com.example.media.OfflineLanguageCatalog
 import com.example.model.CaptionAnimationPreset
@@ -90,9 +91,10 @@ fun CaptionStudioInspector(
     autoCaptionError: String? = null,
     isLiveMicDictating: Boolean = false,
     liveMicPartialText: String = "",
-    onRunGeminiAutoCaptions: (String) -> Unit = {},
-    onRunOfflineVideoAutoCaptions: (String) -> Unit = {},
-    onToggleOfflineMicDictation: (String) -> Unit = {},
+    onRunGeminiAutoCaptions: (sourceLang: String, outputMode: CaptionOutputMode, targetLang: String) -> Unit = { _, _, _ -> },
+    onRunOfflineVideoAutoCaptions: (sourceLang: String, outputMode: CaptionOutputMode, targetLang: String) -> Unit = { _, _, _ -> },
+    onToggleOfflineMicDictation: (sourceLang: String, outputMode: CaptionOutputMode) -> Unit = { _, _ -> },
+    onTransformExistingCaptions: (outputMode: CaptionOutputMode, targetLang: String) -> Unit = { _, _ -> },
     onOpenAiLoginSetup: () -> Unit = {},
     onOpenOfflineModelsSetup: () -> Unit = {},
     onOpenLocalTtsStudio: () -> Unit = {},
@@ -114,7 +116,10 @@ fun CaptionStudioInspector(
         listOf(0xFFFFFFFFL, 0xFFFDE047L, 0xFF38BDF8L, 0xFF34D399L, 0xFF0B0C0EL)
     }
     var selectedLanguage by remember { mutableStateOf("Auto") }
+    var captionOutputMode by remember { mutableStateOf(CaptionOutputMode.ORIGINAL_SCRIPT) }
+    var targetOutputLanguage by remember { mutableStateOf("English") }
     val languages = remember { OfflineLanguageCatalog.captionChipOptions }
+    val targetLanguages = remember { OfflineLanguageCatalog.languages.map { it.displayName } }
 
     Surface(
         color = InspectorCharcoal,
@@ -209,34 +214,126 @@ fun CaptionStudioInspector(
                     }
                 }
 
-                // 18+ Language selector chips (shared across Cloud AI & Offline Models)
+                // 18+ Spoken Audio Language selector chips
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    languages.forEach { lang ->
-                        val picked = lang == selectedLanguage
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(if (picked) AmberContainer else ActiveRail)
-                                .border(
-                                    1.dp,
-                                    if (picked) CinemaAmber else BorderHairline,
-                                    RoundedCornerShape(6.dp)
+                    Text("Audio", style = MaterialTheme.typography.labelSmall, color = SilverMuted)
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        languages.forEach { lang ->
+                            val picked = lang == selectedLanguage
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (picked) AmberContainer else ActiveRail)
+                                    .border(
+                                        1.dp,
+                                        if (picked) CinemaAmber else BorderHairline,
+                                        RoundedCornerShape(6.dp)
+                                    )
+                                    .clickable { selectedLanguage = lang }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                    .testTag("caption_src_lang_${lang.lowercase()}")
+                            ) {
+                                Text(
+                                    text = lang,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (picked) CinemaAmber else ChalkWhite
                                 )
-                                .clickable { selectedLanguage = lang }
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                text = lang,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (picked) CinemaAmber else ChalkWhite
-                            )
+                            }
                         }
                     }
+                }
+
+                // Caption Output Mode: Original Script | Translate to Any Language | English Phonetic (Pronounce-as-Audio)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text("Output", style = MaterialTheme.typography.labelSmall, color = SilverMuted)
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        CaptionOutputMode.entries.forEach { mode ->
+                            val picked = captionOutputMode == mode
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (picked) TrackOverlayEmerald.copy(alpha = 0.22f) else ActiveRail)
+                                    .border(
+                                        1.dp,
+                                        if (picked) TrackOverlayEmerald else BorderHairline,
+                                        RoundedCornerShape(6.dp)
+                                    )
+                                    .clickable { captionOutputMode = mode }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                    .testTag("caption_output_mode_${mode.name.lowercase()}")
+                            ) {
+                                Text(
+                                    text = mode.shortLabel,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (picked) TrackOverlayEmerald else ChalkWhite
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Target Translation Language picker (shown when Translate mode is selected)
+                if (captionOutputMode == CaptionOutputMode.TRANSLATE) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text("To", style = MaterialTheme.typography.labelSmall, color = TrackOverlayEmerald)
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            targetLanguages.forEach { target ->
+                                val picked = target == targetOutputLanguage
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(if (picked) AmberContainer else ActiveRail)
+                                        .border(
+                                            1.dp,
+                                            if (picked) CinemaAmber else BorderHairline,
+                                            RoundedCornerShape(6.dp)
+                                        )
+                                        .clickable { targetOutputLanguage = target }
+                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        .testTag("caption_target_lang_${target.lowercase()}")
+                                ) {
+                                    Text(
+                                        text = target,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (picked) CinemaAmber else ChalkWhite
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else if (captionOutputMode == CaptionOutputMode.PHONETIC_ENGLISH) {
+                    Text(
+                        text = "Writes English letters pronounced like the spoken audio (e.g. Telugu 'ఎలా ఉన్నారు' → 'Ela unnaru').",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TrackOverlayEmerald
+                    )
                 }
 
                 Row(
@@ -244,7 +341,7 @@ fun CaptionStudioInspector(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     FilledTonalButton(
-                        onClick = { onRunGeminiAutoCaptions(selectedLanguage) },
+                        onClick = { onRunGeminiAutoCaptions(selectedLanguage, captionOutputMode, targetOutputLanguage) },
                         enabled = !autoCaptionLoading && !isLiveMicDictating,
                         colors = ButtonDefaults.filledTonalButtonColors(
                             containerColor = CinemaAmber,
@@ -271,7 +368,7 @@ fun CaptionStudioInspector(
                     }
 
                     FilledTonalButton(
-                        onClick = { onRunOfflineVideoAutoCaptions(selectedLanguage) },
+                        onClick = { onRunOfflineVideoAutoCaptions(selectedLanguage, captionOutputMode, targetOutputLanguage) },
                         enabled = !autoCaptionLoading && !isLiveMicDictating,
                         colors = ButtonDefaults.filledTonalButtonColors(
                             containerColor = TrackOverlayEmerald.copy(alpha = 0.22f),
@@ -288,7 +385,7 @@ fun CaptionStudioInspector(
                     }
 
                     FilledTonalButton(
-                        onClick = { onToggleOfflineMicDictation(selectedLanguage) },
+                        onClick = { onToggleOfflineMicDictation(selectedLanguage, captionOutputMode) },
                         enabled = !autoCaptionLoading,
                         colors = ButtonDefaults.filledTonalButtonColors(
                             containerColor = if (isLiveMicDictating) ErrorCrimson else ActiveRail,
@@ -309,6 +406,35 @@ fun CaptionStudioInspector(
                             text = if (isLiveMicDictating) "Stop Mic" else "Offline Mic",
                             style = MaterialTheme.typography.labelSmall,
                             maxLines = 1
+                        )
+                    }
+                }
+
+                // 1-Tap Convert Existing Captions (Translate to target language OR Convert to Phonetic English)
+                if (captions.isNotEmpty() && captionOutputMode != CaptionOutputMode.ORIGINAL_SCRIPT) {
+                    FilledTonalButton(
+                        onClick = { onTransformExistingCaptions(captionOutputMode, targetOutputLanguage) },
+                        enabled = !autoCaptionLoading && !isLiveMicDictating,
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = ActiveRail,
+                            contentColor = CinemaAmber
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(36.dp)
+                            .testTag("btn_transform_existing_captions")
+                    ) {
+                        Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = if (captionOutputMode == CaptionOutputMode.TRANSLATE) {
+                                "Translate ${captions.size} Existing Captions → $targetOutputLanguage"
+                            } else {
+                                "Convert ${captions.size} Captions → English Phonetic"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }

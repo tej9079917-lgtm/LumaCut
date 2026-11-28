@@ -46,6 +46,8 @@ object MultiProviderTranscriptionEngine {
         payload: ExtractedAudioPayload,
         clipStartOnTimelineMs: Long,
         languageHint: String,
+        outputMode: CaptionOutputMode = CaptionOutputMode.ORIGINAL_SCRIPT,
+        targetOutputLanguage: String = "English",
         maxWordsPerLine: Int = 5
     ): Result<List<CaptionClip>> {
         val store = SecureCredentialStore.getInstance(context)
@@ -66,6 +68,8 @@ object MultiProviderTranscriptionEngine {
                     clipStartOnTimelineMs = clipStartOnTimelineMs,
                     clipDurationMs = payload.durationMs,
                     languageHint = languageHint,
+                    outputMode = outputMode,
+                    targetOutputLanguage = targetOutputLanguage,
                     maxWordsPerLine = maxWordsPerLine
                 )
             }
@@ -79,6 +83,8 @@ object MultiProviderTranscriptionEngine {
                     payload = payload,
                     clipStartOnTimelineMs = clipStartOnTimelineMs,
                     languageHint = languageHint,
+                    outputMode = outputMode,
+                    targetOutputLanguage = targetOutputLanguage,
                     maxWordsPerLine = maxWordsPerLine
                 )
             }
@@ -87,34 +93,140 @@ object MultiProviderTranscriptionEngine {
                     ?: return Result.failure(
                         IllegalStateException("Connect your Groq API key in AI Login first.")
                     )
-                transcribeWithWhisperCompatible(
-                    endpointUrl = "https://api.groq.com/openai/v1/audio/transcriptions",
+                val useDirectEnglishTranslate =
+                    outputMode == CaptionOutputMode.TRANSLATE && targetOutputLanguage.equals("English", ignoreCase = true)
+                val baseResult = transcribeWithWhisperCompatible(
+                    endpointUrl = if (useDirectEnglishTranslate) {
+                        "https://api.groq.com/openai/v1/audio/translations"
+                    } else {
+                        "https://api.groq.com/openai/v1/audio/transcriptions"
+                    },
                     modelName = GROQ_WHISPER_MODEL,
                     providerLabel = "Groq Whisper",
                     apiKey = key,
                     payload = payload,
                     clipStartOnTimelineMs = clipStartOnTimelineMs,
-                    languageHint = languageHint,
+                    languageHint = if (useDirectEnglishTranslate) "Auto" else languageHint,
                     maxWordsPerLine = maxWordsPerLine
                 )
+                if (useDirectEnglishTranslate || outputMode == CaptionOutputMode.ORIGINAL_SCRIPT) {
+                    baseResult
+                } else {
+                    baseResult.fold(
+                        onSuccess = { clips -> transformExistingCaptions(context, clips, outputMode, targetOutputLanguage) },
+                        onFailure = { Result.failure(it) }
+                    )
+                }
             }
             AiCaptionProvider.OPENAI_WHISPER -> {
                 val key = store.getAiApiKey(AiCaptionProvider.OPENAI_WHISPER)
                     ?: return Result.failure(
                         IllegalStateException("Connect your OpenAI API key in AI Login first.")
                     )
-                transcribeWithWhisperCompatible(
-                    endpointUrl = "https://api.openai.com/v1/audio/transcriptions",
+                val useDirectEnglishTranslate =
+                    outputMode == CaptionOutputMode.TRANSLATE && targetOutputLanguage.equals("English", ignoreCase = true)
+                val baseResult = transcribeWithWhisperCompatible(
+                    endpointUrl = if (useDirectEnglishTranslate) {
+                        "https://api.openai.com/v1/audio/translations"
+                    } else {
+                        "https://api.openai.com/v1/audio/transcriptions"
+                    },
                     modelName = OPENAI_WHISPER_MODEL,
                     providerLabel = "OpenAI Whisper",
                     apiKey = key,
                     payload = payload,
                     clipStartOnTimelineMs = clipStartOnTimelineMs,
-                    languageHint = languageHint,
+                    languageHint = if (useDirectEnglishTranslate) "Auto" else languageHint,
                     maxWordsPerLine = maxWordsPerLine
+                )
+                if (useDirectEnglishTranslate || outputMode == CaptionOutputMode.ORIGINAL_SCRIPT) {
+                    baseResult
+                } else {
+                    baseResult.fold(
+                        onSuccess = { clips -> transformExistingCaptions(context, clips, outputMode, targetOutputLanguage) },
+                        onFailure = { Result.failure(it) }
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Translates existing timeline captions into any target language OR converts them into
+     * Phonetic English (e.g., Telugu "ఎలా ఉన్నారు" -> "Ela unnaru").
+     * Automatically routes through the user's connected AI provider, falling back to
+     * pure on-device [com.example.media.PhoneticTransliterator] for Phonetic English when offline.
+     */
+    suspend fun transformExistingCaptions(
+        context: Context,
+        captions: List<CaptionClip>,
+        outputMode: CaptionOutputMode,
+        targetOutputLanguage: String
+    ): Result<List<CaptionClip>> {
+        if (captions.isEmpty()) {
+            return Result.failure(IllegalArgumentException("Generate or add captions first before converting."))
+        }
+        if (outputMode == CaptionOutputMode.ORIGINAL_SCRIPT) {
+            return Result.success(captions)
+        }
+
+        val store = SecureCredentialStore.getInstance(context)
+        val provider = store.aiState.value.activeProvider
+
+        val cloudResult: Result<List<CaptionClip>> = when (provider) {
+            AiCaptionProvider.FIREBASE_BUILTIN -> {
+                if (FirebaseAuthManager.isSignedIn()) {
+                    GeminiColoristService.transformCaptions(context, captions, outputMode, targetOutputLanguage)
+                } else {
+                    Result.failure(
+                        FirebaseAuthRequiredException(
+                            "Sign in with Google in AI Login to translate captions into $targetOutputLanguage, or use Phonetic English offline."
+                        )
+                    )
+                }
+            }
+            AiCaptionProvider.GEMINI_API_KEY -> {
+                val key = store.getAiApiKey(AiCaptionProvider.GEMINI_API_KEY)
+                    ?: return Result.failure(IllegalStateException("Connect your Personal Gemini key in AI Login first."))
+                transformWithPersonalGemini(key, captions, outputMode, targetOutputLanguage)
+            }
+            AiCaptionProvider.GROQ_WHISPER -> {
+                val key = store.getAiApiKey(AiCaptionProvider.GROQ_WHISPER)
+                    ?: return Result.failure(IllegalStateException("Connect your Groq key in AI Login first."))
+                transformWithOpenAiCompatibleChat(
+                    endpointUrl = "https://api.groq.com/openai/v1/chat/completions",
+                    modelName = "llama-3.3-70b-versatile",
+                    apiKey = key,
+                    captions = captions,
+                    outputMode = outputMode,
+                    targetOutputLanguage = targetOutputLanguage
+                )
+            }
+            AiCaptionProvider.OPENAI_WHISPER -> {
+                val key = store.getAiApiKey(AiCaptionProvider.OPENAI_WHISPER)
+                    ?: return Result.failure(IllegalStateException("Connect your OpenAI key in AI Login first."))
+                transformWithOpenAiCompatibleChat(
+                    endpointUrl = "https://api.openai.com/v1/chat/completions",
+                    modelName = "gpt-4o-mini",
+                    apiKey = key,
+                    captions = captions,
+                    outputMode = outputMode,
+                    targetOutputLanguage = targetOutputLanguage
                 )
             }
         }
+
+        if (cloudResult.isSuccess) return cloudResult
+
+        // For Phonetic English mode, always provide a seamless 100% offline Indic transliteration fallback!
+        if (outputMode == CaptionOutputMode.PHONETIC_ENGLISH) {
+            val offlineConverted = captions.map { cap ->
+                cap.copy(text = com.example.media.PhoneticTransliterator.toPhoneticEnglish(cap.text))
+            }
+            return Result.success(offlineConverted)
+        }
+
+        return cloudResult
     }
 
     /**
@@ -179,18 +291,25 @@ object MultiProviderTranscriptionEngine {
         payload: ExtractedAudioPayload,
         clipStartOnTimelineMs: Long,
         languageHint: String,
+        outputMode: CaptionOutputMode,
+        targetOutputLanguage: String,
         maxWordsPerLine: Int
     ): Result<List<CaptionClip>> = withContext(Dispatchers.IO) {
         try {
             val b64Audio = Base64.encodeToString(payload.bytes, Base64.NO_WRAP)
-            val langInstruction = if (languageHint.equals("Auto", ignoreCase = true) || languageHint.isBlank()) {
-                "Detect the spoken language automatically and transcribe accurately in the speaker's language."
+            val sourceDesc = if (languageHint.equals("Auto", ignoreCase = true) || languageHint.isBlank()) {
+                "automatically detect the spoken language in the audio"
             } else {
-                "Transcribe the spoken audio accurately in $languageHint (native script if applicable)."
+                "the spoken audio is in $languageHint"
             }
+            val outputInstruction = GeminiColoristService.buildCaptionOutputPromptInstruction(
+                sourceLangDesc = sourceDesc,
+                outputMode = outputMode,
+                targetOutputLanguage = targetOutputLanguage
+            )
             val prompt = buildString {
-                append("Transcribe all spoken words from the attached audio into timed video subtitle segments. ")
-                append("$langInstruction ")
+                append("Create timed video subtitle segments for all spoken words in the attached audio. ")
+                append("$outputInstruction ")
                 append("Keep each segment 2 to ${maxWordsPerLine.coerceIn(3, 8)} words long with startMs and endMs integers ")
                 append("between 0 and ${payload.durationMs.coerceAtLeast(1000L)}. ")
                 append("Return ONLY JSON matching {\"segments\":[{\"startMs\":0,\"endMs\":1800,\"text\":\"...\"}]}.")
@@ -205,31 +324,6 @@ object MultiProviderTranscriptionEngine {
             val textPart = JSONObject().put("text", prompt)
             val contentObj = JSONObject().put("parts", JSONArray().put(inlinePart).put(textPart))
 
-            val responseSchema = JSONObject()
-                .put("type", "OBJECT")
-                .put(
-                    "properties",
-                    JSONObject().put(
-                        "segments",
-                        JSONObject()
-                            .put("type", "ARRAY")
-                            .put(
-                                "items",
-                                JSONObject()
-                                    .put("type", "OBJECT")
-                                    .put(
-                                        "properties",
-                                        JSONObject()
-                                            .put("startMs", JSONObject().put("type", "INTEGER"))
-                                            .put("endMs", JSONObject().put("type", "INTEGER"))
-                                            .put("text", JSONObject().put("type", "STRING"))
-                                    )
-                                    .put("required", JSONArray().put("startMs").put("endMs").put("text"))
-                            )
-                    )
-                )
-                .put("required", JSONArray().put("segments"))
-
             val bodyJson = JSONObject()
                 .put("contents", JSONArray().put(contentObj))
                 .put(
@@ -237,7 +331,7 @@ object MultiProviderTranscriptionEngine {
                     JSONObject()
                         .put("temperature", 0.2)
                         .put("responseMimeType", "application/json")
-                        .put("responseSchema", responseSchema)
+                        .put("responseSchema", buildSegmentsJsonSchema())
                 )
 
             val request = Request.Builder()
@@ -300,6 +394,122 @@ object MultiProviderTranscriptionEngine {
             Result.failure(IllegalStateException("Personal Gemini error: ${e.localizedMessage ?: "network error"}"))
         }
     }
+
+    private suspend fun transformWithPersonalGemini(
+        apiKey: String,
+        captions: List<CaptionClip>,
+        outputMode: CaptionOutputMode,
+        targetOutputLanguage: String
+    ): Result<List<CaptionClip>> = withContext(Dispatchers.IO) {
+        try {
+            val indexed = captions.mapIndexed { idx, c -> "${idx + 1}. ${c.text}" }.joinToString("\n")
+            val prompt = GeminiColoristService.buildTransformCaptionsPrompt(indexed, captions.size, outputMode, targetOutputLanguage)
+            val bodyJson = JSONObject()
+                .put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
+                .put(
+                    "generationConfig",
+                    JSONObject()
+                        .put("temperature", 0.2)
+                        .put("responseMimeType", "application/json")
+                        .put("responseSchema", buildSegmentsJsonSchema())
+                )
+            val request = Request.Builder()
+                .url("https://generativelanguage.googleapis.com/v1beta/models/$PERSONAL_GEMINI_MODEL:generateContent")
+                .addHeader("x-goog-api-key", apiKey)
+                .post(bodyJson.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+            httpClient.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    return@withContext Result.failure(IllegalStateException("Personal Gemini caption convert failed (HTTP ${resp.code})."))
+                }
+                val root = JSONObject(resp.body?.string().orEmpty())
+                val txt = root.optJSONArray("candidates")?.optJSONObject(0)
+                    ?.optJSONObject("content")?.optJSONArray("parts")?.optJSONObject(0)?.optString("text")
+                    ?.let { CaptionSegmentNormalizer.stripJsonMarkdownFences(it) }
+                    ?: return@withContext Result.failure(IllegalStateException("Empty conversion response."))
+                val arr = JSONObject(txt).optJSONArray("segments")
+                    ?: return@withContext Result.failure(IllegalStateException("No converted segments returned."))
+                val updated = captions.mapIndexed { idx, cap ->
+                    val newText = arr.optJSONObject(idx)?.optString("text", "")?.trim().orEmpty()
+                    if (newText.isNotEmpty()) cap.copy(text = newText) else cap
+                }
+                Result.success(updated)
+            }
+        } catch (e: Exception) {
+            Result.failure(IllegalStateException("Caption conversion failed: ${e.localizedMessage}"))
+        }
+    }
+
+    private suspend fun transformWithOpenAiCompatibleChat(
+        endpointUrl: String,
+        modelName: String,
+        apiKey: String,
+        captions: List<CaptionClip>,
+        outputMode: CaptionOutputMode,
+        targetOutputLanguage: String
+    ): Result<List<CaptionClip>> = withContext(Dispatchers.IO) {
+        try {
+            val indexed = captions.mapIndexed { idx, c -> "${idx + 1}. ${c.text}" }.joinToString("\n")
+            val prompt = GeminiColoristService.buildTransformCaptionsPrompt(indexed, captions.size, outputMode, targetOutputLanguage)
+            val bodyJson = JSONObject()
+                .put("model", modelName)
+                .put("temperature", 0.2)
+                .put("response_format", JSONObject().put("type", "json_object"))
+                .put(
+                    "messages",
+                    JSONArray().put(JSONObject().put("role", "user").put("content", prompt))
+                )
+            val req = Request.Builder()
+                .url(endpointUrl)
+                .addHeader("Authorization", "Bearer $apiKey")
+                .post(bodyJson.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    return@withContext Result.failure(IllegalStateException("Translation failed (HTTP ${resp.code})."))
+                }
+                val root = JSONObject(resp.body?.string().orEmpty())
+                val content = root.optJSONArray("choices")?.optJSONObject(0)
+                    ?.optJSONObject("message")?.optString("content")
+                    ?.let { CaptionSegmentNormalizer.stripJsonMarkdownFences(it) }
+                    ?: return@withContext Result.failure(IllegalStateException("Empty translation response."))
+                val arr = JSONObject(content).optJSONArray("segments")
+                    ?: return@withContext Result.failure(IllegalStateException("No translated segments returned."))
+                val updated = captions.mapIndexed { idx, cap ->
+                    val newText = arr.optJSONObject(idx)?.optString("text", "")?.trim().orEmpty()
+                    if (newText.isNotEmpty()) cap.copy(text = newText) else cap
+                }
+                Result.success(updated)
+            }
+        } catch (e: Exception) {
+            Result.failure(IllegalStateException("Caption conversion error: ${e.localizedMessage}"))
+        }
+    }
+
+    private fun buildSegmentsJsonSchema(): JSONObject = JSONObject()
+        .put("type", "OBJECT")
+        .put(
+            "properties",
+            JSONObject().put(
+                "segments",
+                JSONObject()
+                    .put("type", "ARRAY")
+                    .put(
+                        "items",
+                        JSONObject()
+                            .put("type", "OBJECT")
+                            .put(
+                                "properties",
+                                JSONObject()
+                                    .put("startMs", JSONObject().put("type", "INTEGER"))
+                                    .put("endMs", JSONObject().put("type", "INTEGER"))
+                                    .put("text", JSONObject().put("type", "STRING"))
+                            )
+                            .put("required", JSONArray().put("startMs").put("endMs").put("text"))
+                    )
+            )
+        )
+        .put("required", JSONArray().put("segments"))
 
     private suspend fun transcribeWithWhisperCompatible(
         endpointUrl: String,

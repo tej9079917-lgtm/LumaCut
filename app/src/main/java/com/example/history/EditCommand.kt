@@ -1022,6 +1022,30 @@ data class DeleteCaptionCommand(
         )
 }
 
+data class ReplaceCaptionsCommand(
+    val beforeCaptions: List<CaptionClip>,
+    val afterCaptions: List<CaptionClip>,
+    override val label: String = "Convert Captions",
+    override val timestampMs: Long = System.currentTimeMillis()
+) : EditCommand {
+    override val category: CommandCategory = CommandCategory.CAPTIONS
+    override val mergeKey: String? = null
+
+    override fun execute(state: EditorDocumentState): EditorDocumentState =
+        state.copy(
+            timeline = state.timeline.copy(
+                captions = afterCaptions.sortedBy { it.startTimeMs }
+            )
+        )
+
+    override fun undo(state: EditorDocumentState): EditorDocumentState =
+        state.copy(
+            timeline = state.timeline.copy(
+                captions = beforeCaptions.sortedBy { it.startTimeMs }
+            )
+        )
+}
+
 data class ReplaceMainClipsCommand(
     val beforeClips: List<MainClip>,
     val afterClips: List<MainClip>,

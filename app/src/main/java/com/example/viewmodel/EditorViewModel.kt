@@ -8,6 +8,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.util.UnstableApi
 import com.example.ai.AiCreativeIdeasResult
+import com.example.ai.CaptionOutputMode
 import com.example.ai.GeminiColoristService
 import com.example.ai.MultiProviderTranscriptionEngine
 import com.example.automation.EditorAutomationBridge
@@ -46,6 +47,7 @@ import com.example.history.OverlayTransformSnapshot
 import com.example.history.ProjectTitleCommand
 import com.example.history.ReorderMainClipCommand
 import com.example.history.ReorderOverlayZCommand
+import com.example.history.ReplaceCaptionsCommand
 import com.example.history.ReplaceMainClipsCommand
 import com.example.history.SafeZoneOverlayCommand
 import com.example.history.SplitAudioClipCommand
@@ -68,12 +70,16 @@ import com.example.media.Media3ExportEngine
 import com.example.media.OfflineLanguageCatalog
 import com.example.media.OfflineSpeechCaptionEngine
 import com.example.media.OfflineSpeechModelManager
+import com.example.media.OnlineVoiceCloneTtsEngine
+import com.example.media.PhoneticTransliterator
 import com.example.media.RenderQueueManager
 import com.example.media.SpeedRampPreset
 import com.example.media.SrtCodec
 import com.example.media.StudioCreativeTools
 import com.example.media.VoiceoverRecorder
 import com.example.media.YouTubeImportedAsset
+import com.example.security.ClonedVoiceProfile
+import com.example.security.OnlineVoiceCloneProvider
 import com.example.security.SecureCredentialStore
 import com.example.model.AiCutoutSettings
 import com.example.model.AspectRatio
@@ -3024,7 +3030,11 @@ class EditorViewModel(
             }
     }
 
-    fun runGeminiAutoCaptions(languageHint: String) {
+    fun runGeminiAutoCaptions(
+        languageHint: String,
+        outputMode: CaptionOutputMode = CaptionOutputMode.ORIGINAL_SCRIPT,
+        targetOutputLanguage: String = "English"
+    ) {
         pausePlayback()
         val target = resolveCaptionAudioTarget()
         if (target == null) {
@@ -3060,31 +3070,39 @@ class EditorViewModel(
                     return@launch
                 }
 
+                val modeBadge = when (outputMode) {
+                    CaptionOutputMode.ORIGINAL_SCRIPT -> languageHint
+                    CaptionOutputMode.TRANSLATE -> "$languageHint → $targetOutputLanguage"
+                    CaptionOutputMode.PHONETIC_ENGLISH -> "$languageHint → English Phonetic"
+                }
+
                 _uiState.update {
-                    it.copy(autoCaptionStatus = "Transcribing with ${activeProvider.shortBadge} ($languageHint)…")
+                    it.copy(autoCaptionStatus = "Transcribing with ${activeProvider.shortBadge} ($modeBadge)…")
                 }
 
                 val result = MultiProviderTranscriptionEngine.transcribe(
                     context = appContext,
                     payload = extracted,
                     clipStartOnTimelineMs = target.timelineStartMs,
-                    languageHint = languageHint
+                    languageHint = languageHint,
+                    outputMode = outputMode,
+                    targetOutputLanguage = targetOutputLanguage
                 )
 
                 result.onSuccess { captions ->
                     dispatchCommand(
-                        command = AddCaptionsCommand(captions, "AI Auto Captions (${captions.size})"),
+                        command = AddCaptionsCommand(captions, "AI Captions ($modeBadge)"),
                         newSelection = SelectedItem.CaptionItem(captions.first().id),
                         newInspector = InspectorTab.CAPTIONS
                     )
                     _uiState.update {
                         it.copy(
                             autoCaptionLoading = false,
-                            autoCaptionStatus = "Added ${captions.size} synced captions (${activeProvider.shortBadge})",
+                            autoCaptionStatus = "Added ${captions.size} synced captions ($modeBadge)",
                             autoCaptionError = null
                         )
                     }
-                    _feedback.tryEmit("Transcribed ${captions.size} timed captions")
+                    _feedback.tryEmit("Transcribed ${captions.size} timed captions ($modeBadge)")
                 }.onFailure { err ->
                     _uiState.update {
                         it.copy(
@@ -3108,7 +3126,11 @@ class EditorViewModel(
         }
     }
 
-    fun runOfflineVideoAutoCaptions(languageHint: String) {
+    fun runOfflineVideoAutoCaptions(
+        languageHint: String,
+        outputMode: CaptionOutputMode = CaptionOutputMode.ORIGINAL_SCRIPT,
+        targetOutputLanguage: String = "English"
+    ) {
         pausePlayback()
         val target = resolveCaptionAudioTarget()
         if (target == null) {
@@ -3138,20 +3160,49 @@ class EditorViewModel(
                         _uiState.update { it.copy(autoCaptionStatus = status) }
                     }
                 )
-                result.onSuccess { captions ->
+                result.onSuccess { rawCaptions ->
+                    val finalCaptions: List<CaptionClip> = when (outputMode) {
+                        CaptionOutputMode.ORIGINAL_SCRIPT -> rawCaptions
+                        CaptionOutputMode.PHONETIC_ENGLISH -> {
+                            _uiState.update { it.copy(autoCaptionStatus = "Converting to Phonetic English…") }
+                            rawCaptions.map { cap ->
+                                cap.copy(text = PhoneticTransliterator.toPhoneticEnglish(cap.text))
+                            }
+                        }
+                        CaptionOutputMode.TRANSLATE -> {
+                            _uiState.update { it.copy(autoCaptionStatus = "Translating captions → $targetOutputLanguage…") }
+                            MultiProviderTranscriptionEngine.transformExistingCaptions(
+                                context = appContext,
+                                captions = rawCaptions,
+                                outputMode = CaptionOutputMode.TRANSLATE,
+                                targetOutputLanguage = targetOutputLanguage
+                            ).getOrElse { translateErr ->
+                                _uiState.update {
+                                    it.copy(
+                                        autoCaptionError = "Recognized offline speech, but translation to $targetOutputLanguage needed AI Login (${translateErr.localizedMessage}). Keeping original captions."
+                                    )
+                                }
+                                rawCaptions
+                            }
+                        }
+                    }
+                    val suffix = when (outputMode) {
+                        CaptionOutputMode.ORIGINAL_SCRIPT -> languageHint
+                        CaptionOutputMode.PHONETIC_ENGLISH -> "$languageHint → English Phonetic"
+                        CaptionOutputMode.TRANSLATE -> "$languageHint → $targetOutputLanguage"
+                    }
                     dispatchCommand(
-                        command = AddCaptionsCommand(captions, "Offline Auto Captions (${captions.size})"),
-                        newSelection = SelectedItem.CaptionItem(captions.first().id),
+                        command = AddCaptionsCommand(finalCaptions, "Offline Captions ($suffix)"),
+                        newSelection = SelectedItem.CaptionItem(finalCaptions.first().id),
                         newInspector = InspectorTab.CAPTIONS
                     )
                     _uiState.update {
                         it.copy(
                             autoCaptionLoading = false,
-                            autoCaptionStatus = "Added ${captions.size} offline captions ($languageHint)",
-                            autoCaptionError = null
+                            autoCaptionStatus = "Added ${finalCaptions.size} captions ($suffix)"
                         )
                     }
-                    _feedback.tryEmit("Transcribed ${captions.size} captions offline!")
+                    _feedback.tryEmit("Transcribed ${finalCaptions.size} captions ($suffix)")
                 }.onFailure { err ->
                     _uiState.update {
                         it.copy(
@@ -3175,24 +3226,89 @@ class EditorViewModel(
         }
     }
 
-    fun startOfflineMicDictation(languageHint: String = "Auto") {
+    fun transformExistingCaptions(
+        outputMode: CaptionOutputMode,
+        targetOutputLanguage: String
+    ) {
+        val currentCaptions = _uiState.value.timeline.captions
+        if (currentCaptions.isEmpty()) {
+            _uiState.update { it.copy(autoCaptionError = "Generate or add captions first.") }
+            return
+        }
+        viewModelScope.launch {
+            val label = if (outputMode == CaptionOutputMode.TRANSLATE) {
+                "Translating ${currentCaptions.size} captions → $targetOutputLanguage…"
+            } else {
+                "Converting ${currentCaptions.size} captions → English Phonetic…"
+            }
+            _uiState.update {
+                it.copy(autoCaptionLoading = true, autoCaptionStatus = label, autoCaptionError = null)
+            }
+            val result = MultiProviderTranscriptionEngine.transformExistingCaptions(
+                context = appContext,
+                captions = currentCaptions,
+                outputMode = outputMode,
+                targetOutputLanguage = targetOutputLanguage
+            )
+            result.onSuccess { converted ->
+                val cmdLabel = if (outputMode == CaptionOutputMode.TRANSLATE) {
+                    "Translate Captions ($targetOutputLanguage)"
+                } else {
+                    "Phonetic English Captions"
+                }
+                dispatchCommand(
+                    command = ReplaceCaptionsCommand(currentCaptions, converted, cmdLabel),
+                    newSelection = converted.firstOrNull()?.let { SelectedItem.CaptionItem(it.id) },
+                    newInspector = InspectorTab.CAPTIONS
+                )
+                _uiState.update {
+                    it.copy(
+                        autoCaptionLoading = false,
+                        autoCaptionStatus = "Updated ${converted.size} captions ($cmdLabel)",
+                        autoCaptionError = null
+                    )
+                }
+                _feedback.tryEmit("Updated ${converted.size} captions!")
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        autoCaptionLoading = false,
+                        autoCaptionStatus = null,
+                        autoCaptionError = err.localizedMessage ?: "Failed to convert captions."
+                    )
+                }
+            }
+        }
+    }
+
+    fun startOfflineMicDictation(
+        languageHint: String = "Auto",
+        outputMode: CaptionOutputMode = CaptionOutputMode.ORIGINAL_SCRIPT
+    ) {
         if (_uiState.value.isLiveMicDictating) return
         if (_uiState.value.isRecordingVoiceover) stopVoiceoverRecording()
         val langTag = OfflineLanguageCatalog.bcp47ForName(languageHint)
+        val phonetic = outputMode == CaptionOutputMode.PHONETIC_ENGLISH
         _uiState.update {
             it.copy(
                 autoCaptionError = null,
-                autoCaptionStatus = "Listening ($languageHint) via device mic…"
+                autoCaptionStatus = if (phonetic) {
+                    "Listening ($languageHint → English Phonetic)…"
+                } else {
+                    "Listening ($languageHint) via device mic…"
+                }
             )
         }
         offlineSpeechEngine.start(
             languageTag = langTag,
             currentPlayheadMs = { _uiState.value.playheadMs },
             onPartialText = { partial ->
-                _uiState.update { it.copy(liveMicPartialText = partial) }
+                val display = if (phonetic) PhoneticTransliterator.toPhoneticEnglish(partial) else partial
+                _uiState.update { it.copy(liveMicPartialText = display) }
             },
             onFinalPhrase = { phrase, startMs, endMs ->
-                val clean = phrase.trim()
+                val rawClean = phrase.trim()
+                val clean = if (phonetic) PhoneticTransliterator.toPhoneticEnglish(rawClean) else rawClean
                 if (clean.isNotEmpty()) {
                     val caption = CaptionClip(
                         text = clean,
@@ -3285,6 +3401,96 @@ class EditorViewModel(
                     it.copy(
                         localTtsSynthesizing = false,
                         localTtsError = err.localizedMessage ?: "Failed to synthesize offline voice."
+                    )
+                }
+            }
+        }
+    }
+
+    fun cloneVoiceFromActiveTimelineClip(
+        provider: OnlineVoiceCloneProvider,
+        voiceName: String,
+        onResult: (Result<ClonedVoiceProfile>) -> Unit
+    ) {
+        val target = resolveCaptionAudioTarget()
+        if (target == null) {
+            onResult(Result.failure(IllegalStateException("Select a video or audio clip on the timeline first.")))
+            return
+        }
+        viewModelScope.launch {
+            val extracted = AudioClipExtractor.extractForTranscription(
+                context = appContext,
+                uriString = target.uri,
+                trimStartMs = target.trimStartMs,
+                trimEndMs = minOf(target.trimEndMs, target.trimStartMs + 25_000L)
+            )
+            extracted.onSuccess { payload ->
+                val res = OnlineVoiceCloneTtsEngine.cloneVoiceFromAudioBytes(
+                    context = appContext,
+                    provider = provider,
+                    voiceName = voiceName,
+                    audioBytes = payload.bytes,
+                    fileName = "timeline_sample.${payload.fileExtension}",
+                    mimeType = payload.mimeType
+                )
+                onResult(res)
+            }.onFailure { err ->
+                onResult(Result.failure(err))
+            }
+        }
+    }
+
+    fun synthesizeOnlineVoiceCloneToTimeline(
+        provider: OnlineVoiceCloneProvider,
+        voiceId: String,
+        voiceLabel: String,
+        script: String,
+        languageDisplayName: String,
+        stability: Float,
+        similarity: Float,
+        speed: Float,
+        onComplete: () -> Unit = {}
+    ) {
+        pausePlayback()
+        viewModelScope.launch {
+            _uiState.update { it.copy(localTtsSynthesizing = true, localTtsError = null) }
+            val result = OnlineVoiceCloneTtsEngine.synthesizeSpeechToTimeline(
+                context = appContext,
+                provider = provider,
+                voiceId = voiceId,
+                voiceLabel = voiceLabel,
+                text = script,
+                languageDisplayName = languageDisplayName,
+                stability = stability,
+                similarityBoost = similarity,
+                speed = speed
+            )
+            result.onSuccess { synth ->
+                val state = _uiState.value
+                val targetLane = findOpenAudioLane(state.timeline.audioClips, state.playheadMs)
+                val clip = AudioClip(
+                    laneIndex = targetLane,
+                    displayName = synth.displayName,
+                    uri = synth.uriString,
+                    startTimeMs = state.playheadMs,
+                    sourceDurationMs = synth.durationMs,
+                    trimStartMs = 0L,
+                    trimEndMs = synth.durationMs,
+                    waveformPeaks = synth.waveformPeaks
+                )
+                dispatchCommand(
+                    command = AddAudioClipCommand(clip, "Cloned Voice (${provider.shortBadge})"),
+                    newSelection = SelectedItem.AudioItem(clip.id),
+                    newInspector = InspectorTab.AUDIO
+                )
+                _uiState.update { it.copy(localTtsSynthesizing = false, localTtsError = null) }
+                _feedback.tryEmit("Added ${provider.shortBadge} voice (${String.format("%.1fs", synth.durationMs / 1000f)})")
+                onComplete()
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        localTtsSynthesizing = false,
+                        localTtsError = err.localizedMessage ?: "Online AI voice synthesis failed."
                     )
                 }
             }

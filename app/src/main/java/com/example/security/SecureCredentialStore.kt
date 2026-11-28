@@ -88,9 +88,84 @@ data class YouTubeAccountState(
     val hasDataApiKey: Boolean = false
 )
 
+enum class OnlineVoiceCloneProvider(
+    val displayName: String,
+    val shortBadge: String,
+    val description: String,
+    val keyHint: String,
+    val signupUrl: String,
+    val supportsInstantClone: Boolean
+) {
+    ELEVENLABS(
+        displayName = "ElevenLabs Voice Clone",
+        shortBadge = "ElevenLabs",
+        description = "Instant voice cloning from a short audio sample + multilingual neural TTS.",
+        keyHint = "sk_...",
+        signupUrl = "https://elevenlabs.io/app/settings/api-keys",
+        supportsInstantClone = true
+    ),
+    OPENAI_TTS(
+        displayName = "OpenAI Neural TTS",
+        shortBadge = "OpenAI TTS",
+        description = "Expressive studio TTS (`tts-1-hd`) using your OpenAI API key.",
+        keyHint = "sk-...",
+        signupUrl = "https://platform.openai.com/api-keys",
+        supportsInstantClone = false
+    ),
+    CARTESIA(
+        displayName = "Cartesia Sonic Clone",
+        shortBadge = "Cartesia",
+        description = "Ultra-fast Sonic-2 voice cloning & multilingual text-to-speech.",
+        keyHint = "sk_car_...",
+        signupUrl = "https://play.cartesia.ai/keys",
+        supportsInstantClone = true
+    ),
+    CUSTOM_HTTPS_TTS(
+        displayName = "Custom HTTPS TTS API",
+        shortBadge = "Custom TTS",
+        description = "Any HTTPS OpenAI-compatible `/v1/audio/speech` voice clone server.",
+        keyHint = "Bearer token / API key",
+        signupUrl = "",
+        supportsInstantClone = false
+    );
+
+    companion object {
+        fun fromStored(name: String?): OnlineVoiceCloneProvider =
+            entries.firstOrNull { it.name == name } ?: ELEVENLABS
+    }
+}
+
+data class ClonedVoiceProfile(
+    val id: String,
+    val name: String,
+    val provider: OnlineVoiceCloneProvider,
+    val remoteVoiceId: String,
+    val isCloned: Boolean = true,
+    val subtitle: String = ""
+)
+
+data class VoiceCloneCredentialState(
+    val activeProvider: OnlineVoiceCloneProvider = OnlineVoiceCloneProvider.ELEVENLABS,
+    val hasElevenLabsKey: Boolean = false,
+    val hasOpenAiTtsKey: Boolean = false,
+    val hasCartesiaKey: Boolean = false,
+    val hasCustomTtsKey: Boolean = false,
+    val customEndpointUrl: String = "",
+    val maskedActiveKey: String = "",
+    val savedClonedVoices: List<ClonedVoiceProfile> = emptyList()
+) {
+    fun hasKeyFor(provider: OnlineVoiceCloneProvider): Boolean = when (provider) {
+        OnlineVoiceCloneProvider.ELEVENLABS -> hasElevenLabsKey
+        OnlineVoiceCloneProvider.OPENAI_TTS -> hasOpenAiTtsKey
+        OnlineVoiceCloneProvider.CARTESIA -> hasCartesiaKey
+        OnlineVoiceCloneProvider.CUSTOM_HTTPS_TTS -> hasCustomTtsKey && customEndpointUrl.startsWith("https://")
+    }
+}
+
 /**
  * Hardware-backed Android Keystore (AES-256-GCM) credential vault for end-user
- * AI provider login keys and YouTube OAuth tokens. Never hardcodes or logs secrets.
+ * AI provider login keys, Online AI Voice Clone API keys, and YouTube OAuth tokens.
+ * Never hardcodes or logs secrets.
  */
 class SecureCredentialStore private constructor(context: Context) {
 
@@ -102,6 +177,9 @@ class SecureCredentialStore private constructor(context: Context) {
 
     private val _youtubeState = MutableStateFlow(readYouTubeState())
     val youtubeState: StateFlow<YouTubeAccountState> = _youtubeState.asStateFlow()
+
+    private val _voiceCloneState = MutableStateFlow(readVoiceCloneState())
+    val voiceCloneState: StateFlow<VoiceCloneCredentialState> = _voiceCloneState.asStateFlow()
 
     fun setActiveAiProvider(provider: AiCaptionProvider) {
         prefs.edit().putString(KEY_ACTIVE_PROVIDER, provider.name).apply()
@@ -121,6 +199,7 @@ class SecureCredentialStore private constructor(context: Context) {
                 .apply()
         }
         _aiState.value = readAiState()
+        _voiceCloneState.value = readVoiceCloneState()
     }
 
     fun clearAiApiKey(provider: AiCaptionProvider) {
@@ -131,12 +210,152 @@ class SecureCredentialStore private constructor(context: Context) {
         }
         editor.apply()
         _aiState.value = readAiState()
+        _voiceCloneState.value = readVoiceCloneState()
     }
 
     fun getAiApiKey(provider: AiCaptionProvider): String? {
         val prefKey = prefKeyFor(provider) ?: return null
         val cipherBlob = prefs.getString(prefKey, null) ?: return null
         return decrypt(cipherBlob)?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    // ---- Online AI Voice Clone & TTS Credential Management ----
+
+    fun setActiveVoiceCloneProvider(provider: OnlineVoiceCloneProvider) {
+        prefs.edit().putString(KEY_ACTIVE_VOICE_PROVIDER, provider.name).apply()
+        _voiceCloneState.value = readVoiceCloneState()
+    }
+
+    fun saveVoiceCloneApiKey(
+        provider: OnlineVoiceCloneProvider,
+        rawKey: String,
+        customEndpointUrl: String? = null
+    ) {
+        val clean = rawKey.trim()
+        val prefKey = voicePrefKeyFor(provider)
+        val editor = prefs.edit()
+        if (clean.isEmpty()) {
+            editor.remove(prefKey)
+        } else {
+            editor.putString(prefKey, encrypt(clean))
+            editor.putString(KEY_ACTIVE_VOICE_PROVIDER, provider.name)
+        }
+        if (provider == OnlineVoiceCloneProvider.CUSTOM_HTTPS_TTS && customEndpointUrl != null) {
+            editor.putString(KEY_CUSTOM_TTS_URL, customEndpointUrl.trim())
+        }
+        editor.apply()
+        _voiceCloneState.value = readVoiceCloneState()
+    }
+
+    fun clearVoiceCloneApiKey(provider: OnlineVoiceCloneProvider) {
+        val editor = prefs.edit().remove(voicePrefKeyFor(provider))
+        if (provider == OnlineVoiceCloneProvider.CUSTOM_HTTPS_TTS) {
+            editor.remove(KEY_CUSTOM_TTS_URL)
+        }
+        editor.apply()
+        _voiceCloneState.value = readVoiceCloneState()
+    }
+
+    fun getVoiceCloneApiKey(provider: OnlineVoiceCloneProvider): String? {
+        val direct = prefs.getString(voicePrefKeyFor(provider), null)
+            ?.let { decrypt(it) }
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+        if (direct != null) return direct
+        // Allow OpenAI TTS to seamlessly reuse the user's already-saved OpenAI Whisper key
+        if (provider == OnlineVoiceCloneProvider.OPENAI_TTS) {
+            return getAiApiKey(AiCaptionProvider.OPENAI_WHISPER)
+        }
+        return null
+    }
+
+    fun getCustomTtsEndpointUrl(): String =
+        prefs.getString(KEY_CUSTOM_TTS_URL, "").orEmpty().trim()
+
+    fun saveClonedVoiceProfile(profile: ClonedVoiceProfile) {
+        val existing = readSavedClonedVoices().filterNot {
+            it.provider == profile.provider && it.remoteVoiceId == profile.remoteVoiceId
+        }
+        val updated = (listOf(profile) + existing).take(24)
+        persistClonedVoices(updated)
+        _voiceCloneState.value = readVoiceCloneState()
+    }
+
+    fun removeClonedVoiceProfile(provider: OnlineVoiceCloneProvider, remoteVoiceId: String) {
+        val updated = readSavedClonedVoices().filterNot {
+            it.provider == provider && it.remoteVoiceId == remoteVoiceId
+        }
+        persistClonedVoices(updated)
+        _voiceCloneState.value = readVoiceCloneState()
+    }
+
+    private fun readSavedClonedVoices(): List<ClonedVoiceProfile> {
+        val raw = prefs.getString(KEY_CLONED_VOICES_JSON, null) ?: return emptyList()
+        return runCatching {
+            val arr = org.json.JSONArray(raw)
+            (0 until arr.length()).mapNotNull { idx ->
+                val obj = arr.optJSONObject(idx) ?: return@mapNotNull null
+                val vid = obj.optString("remoteVoiceId", "").trim()
+                val name = obj.optString("name", "").trim()
+                if (vid.isEmpty() || name.isEmpty()) return@mapNotNull null
+                ClonedVoiceProfile(
+                    id = obj.optString("id", vid),
+                    name = name,
+                    provider = OnlineVoiceCloneProvider.fromStored(obj.optString("provider")),
+                    remoteVoiceId = vid,
+                    isCloned = obj.optBoolean("isCloned", true),
+                    subtitle = obj.optString("subtitle", "")
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun persistClonedVoices(voices: List<ClonedVoiceProfile>) {
+        val arr = org.json.JSONArray()
+        voices.forEach { v ->
+            arr.put(
+                org.json.JSONObject()
+                    .put("id", v.id)
+                    .put("name", v.name)
+                    .put("provider", v.provider.name)
+                    .put("remoteVoiceId", v.remoteVoiceId)
+                    .put("isCloned", v.isCloned)
+                    .put("subtitle", v.subtitle)
+            )
+        }
+        prefs.edit().putString(KEY_CLONED_VOICES_JSON, arr.toString()).apply()
+    }
+
+    private fun readVoiceCloneState(): VoiceCloneCredentialState {
+        val active = OnlineVoiceCloneProvider.fromStored(prefs.getString(KEY_ACTIVE_VOICE_PROVIDER, null))
+        val elKey = getVoiceCloneApiKey(OnlineVoiceCloneProvider.ELEVENLABS)
+        val oaKey = getVoiceCloneApiKey(OnlineVoiceCloneProvider.OPENAI_TTS)
+        val cartKey = getVoiceCloneApiKey(OnlineVoiceCloneProvider.CARTESIA)
+        val customKey = getVoiceCloneApiKey(OnlineVoiceCloneProvider.CUSTOM_HTTPS_TTS)
+        val customUrl = getCustomTtsEndpointUrl()
+        val activeRaw = when (active) {
+            OnlineVoiceCloneProvider.ELEVENLABS -> elKey.orEmpty()
+            OnlineVoiceCloneProvider.OPENAI_TTS -> oaKey.orEmpty()
+            OnlineVoiceCloneProvider.CARTESIA -> cartKey.orEmpty()
+            OnlineVoiceCloneProvider.CUSTOM_HTTPS_TTS -> customKey.orEmpty()
+        }
+        return VoiceCloneCredentialState(
+            activeProvider = active,
+            hasElevenLabsKey = !elKey.isNullOrEmpty(),
+            hasOpenAiTtsKey = !oaKey.isNullOrEmpty(),
+            hasCartesiaKey = !cartKey.isNullOrEmpty(),
+            hasCustomTtsKey = !customKey.isNullOrEmpty(),
+            customEndpointUrl = customUrl,
+            maskedActiveKey = maskSecret(activeRaw),
+            savedClonedVoices = readSavedClonedVoices()
+        )
+    }
+
+    private fun voicePrefKeyFor(provider: OnlineVoiceCloneProvider): String = when (provider) {
+        OnlineVoiceCloneProvider.ELEVENLABS -> KEY_ELEVENLABS_API_KEY
+        OnlineVoiceCloneProvider.OPENAI_TTS -> KEY_OPENAI_TTS_API_KEY
+        OnlineVoiceCloneProvider.CARTESIA -> KEY_CARTESIA_API_KEY
+        OnlineVoiceCloneProvider.CUSTOM_HTTPS_TTS -> KEY_CUSTOM_TTS_API_KEY
     }
 
     fun saveYouTubeSession(
@@ -282,6 +501,14 @@ class SecureCredentialStore private constructor(context: Context) {
         private const val KEY_GEMINI_API_KEY = "enc_gemini_api_key"
         private const val KEY_GROQ_API_KEY = "enc_groq_api_key"
         private const val KEY_OPENAI_API_KEY = "enc_openai_api_key"
+
+        private const val KEY_ACTIVE_VOICE_PROVIDER = "active_voice_clone_provider"
+        private const val KEY_ELEVENLABS_API_KEY = "enc_elevenlabs_api_key"
+        private const val KEY_OPENAI_TTS_API_KEY = "enc_openai_tts_api_key"
+        private const val KEY_CARTESIA_API_KEY = "enc_cartesia_api_key"
+        private const val KEY_CUSTOM_TTS_API_KEY = "enc_custom_tts_api_key"
+        private const val KEY_CUSTOM_TTS_URL = "custom_tts_endpoint_url"
+        private const val KEY_CLONED_VOICES_JSON = "cloned_voices_json"
 
         private const val KEY_YT_OAUTH_TOKEN = "enc_yt_oauth_token"
         private const val KEY_YT_DATA_API_KEY = "enc_yt_data_api_key"

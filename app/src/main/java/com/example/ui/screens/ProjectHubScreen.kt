@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.QueuePlayNext
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VideoSettings
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.AlertDialog
@@ -114,7 +115,8 @@ import java.util.Locale
 @Composable
 fun ProjectHubScreen(
     viewModel: ProjectsViewModel,
-    onOpenProject: (String) -> Unit
+    onOpenProject: (String) -> Unit,
+    onOpenSettings: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val projects by viewModel.projects.collectAsStateWithLifecycle()
@@ -181,7 +183,8 @@ fun ProjectHubScreen(
                         youtubeUploadTitle = ""
                         youtubeSheetTab = 0
                     },
-                    onOpenAiSetup = { showAiSetupSheet = true }
+                    onOpenAiSetup = { showAiSetupSheet = true },
+                    onOpenSettings = onOpenSettings
                 )
             }
 
@@ -359,7 +362,8 @@ private fun StudioHeroBanner(
     onOpenFontStudio: () -> Unit,
     onOpenRenderQueue: () -> Unit,
     onOpenYouTube: () -> Unit,
-    onOpenAiSetup: () -> Unit
+    onOpenAiSetup: () -> Unit,
+    onOpenSettings: () -> Unit
 ) {
     Box(
         modifier = Modifier
@@ -411,20 +415,41 @@ private fun StudioHeroBanner(
                     )
                 }
 
-                FilledTonalButton(
-                    onClick = onOpenFontStudio,
-                    colors = ButtonDefaults.filledTonalButtonColors(
-                        containerColor = InspectorCharcoal.copy(alpha = 0.85f),
-                        contentColor = ChalkWhite
-                    ),
-                    modifier = Modifier.testTag("hub_font_studio_button")
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Icon(Icons.Default.FontDownload, contentDescription = null, tint = CinemaAmber, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (customFontCount > 0) "Fonts (+$customFontCount)" else "Fonts",
-                        style = MaterialTheme.typography.labelMedium
-                    )
+                    FilledTonalButton(
+                        onClick = onOpenFontStudio,
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = InspectorCharcoal.copy(alpha = 0.85f),
+                            contentColor = ChalkWhite
+                        ),
+                        modifier = Modifier.testTag("hub_font_studio_button")
+                    ) {
+                        Icon(Icons.Default.FontDownload, contentDescription = null, tint = CinemaAmber, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (customFontCount > 0) "Fonts (+$customFontCount)" else "Fonts",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                    IconButton(
+                        onClick = onOpenSettings,
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .background(InspectorCharcoal.copy(alpha = 0.88f))
+                            .border(1.dp, BorderHairline, CircleShape)
+                            .testTag("hub_settings_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Open Studio Settings & Language Management",
+                            tint = CinemaAmber,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
             }
 

@@ -113,6 +113,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.ai.CaptionOutputMode
 import com.example.model.AiCutoutSettings
 import com.example.model.AudioSettings
 import com.example.model.ClipTransform
@@ -127,6 +128,7 @@ import androidx.compose.material.icons.filled.DashboardCustomize
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.QueuePlayNext
 import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.runtime.rememberCoroutineScope
 import com.example.automation.LocalMcpJsonRpcServer
@@ -207,7 +209,8 @@ private tailrec fun Context.findHostActivity(): Activity? = when (this) {
 @Composable
 fun EditorScreen(
     viewModel: EditorViewModel,
-    onNavigateBack: () -> Unit
+    onNavigateBack: () -> Unit,
+    onOpenSettings: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -315,12 +318,13 @@ fun EditorScreen(
     }
 
     var pendingOfflineMicLanguage by remember { mutableStateOf("Auto") }
+    var pendingOfflineMicMode by remember { mutableStateOf(CaptionOutputMode.ORIGINAL_SCRIPT) }
 
     val requestOfflineMicPermission = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
-            viewModel.startOfflineMicDictation(pendingOfflineMicLanguage)
+            viewModel.startOfflineMicDictation(pendingOfflineMicLanguage, pendingOfflineMicMode)
         }
     }
 
@@ -340,17 +344,18 @@ fun EditorScreen(
         }
     }
 
-    val onToggleOfflineMic: (String) -> Unit = { languageHint ->
+    val onToggleOfflineMic: (String, CaptionOutputMode) -> Unit = { languageHint, outputMode ->
         if (state.isLiveMicDictating) {
             viewModel.stopOfflineMicDictation()
         } else {
             pendingOfflineMicLanguage = languageHint
+            pendingOfflineMicMode = outputMode
             val hasMic = ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.RECORD_AUDIO
             ) == PackageManager.PERMISSION_GRANTED
             if (hasMic) {
-                viewModel.startOfflineMicDictation(languageHint)
+                viewModel.startOfflineMicDictation(languageHint, outputMode)
             } else {
                 requestOfflineMicPermission.launch(Manifest.permission.RECORD_AUDIO)
             }
@@ -579,6 +584,7 @@ fun EditorScreen(
                         onCycleWorkspaceLayout = { workspaceLayout = workspaceLayout.next() },
                         isMcpRunning = mcpStatus.isRunning,
                         onOpenAutomationConsole = { showAutomationConsole = true },
+                        onOpenSettings = onOpenSettings,
                         onUndo = { viewModel.undo() },
                         onRedo = { viewModel.redo() },
                         onOpenHistory = { viewModel.openHistorySheet() },
@@ -889,6 +895,7 @@ fun EditorScreen(
             captionsScript = captionsScript,
             isSynthesizing = state.localTtsSynthesizing,
             errorMessage = state.localTtsError,
+            hasTimelineClipForVoiceClone = state.timeline.mainClips.isNotEmpty() || state.timeline.audioClips.isNotEmpty(),
             onSynthesizeToTimeline = { script, lang, profile, pitch, speed ->
                 viewModel.synthesizeLocalTtsToTimeline(
                     script = script,
@@ -898,6 +905,22 @@ fun EditorScreen(
                     speed = speed,
                     onComplete = { showLocalTtsSheet = false }
                 )
+            },
+            onSynthesizeOnlineVoiceClone = { provider, voiceId, voiceLabel, script, lang, stability, similarity, speed ->
+                viewModel.synthesizeOnlineVoiceCloneToTimeline(
+                    provider = provider,
+                    voiceId = voiceId,
+                    voiceLabel = voiceLabel,
+                    script = script,
+                    languageDisplayName = lang,
+                    stability = stability,
+                    similarity = similarity,
+                    speed = speed,
+                    onComplete = { showLocalTtsSheet = false }
+                )
+            },
+            onCloneVoiceFromTimelineClip = { provider, voiceName, onResult ->
+                viewModel.cloneVoiceFromActiveTimelineClip(provider, voiceName, onResult)
             },
             onDismiss = { showLocalTtsSheet = false }
         )
@@ -979,6 +1002,7 @@ private fun StudioTopBar(
     onCycleWorkspaceLayout: () -> Unit = {},
     isMcpRunning: Boolean = false,
     onOpenAutomationConsole: () -> Unit = {},
+    onOpenSettings: () -> Unit = {},
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onOpenHistory: () -> Unit,
@@ -1069,6 +1093,18 @@ private fun StudioTopBar(
                     imageVector = Icons.Default.Terminal,
                     contentDescription = "MCP and JSON-RPC Automation Console",
                     tint = if (isMcpRunning) TrackOverlayEmerald else SilverMuted,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            IconButton(
+                onClick = onOpenSettings,
+                modifier = Modifier.size(34.dp).testTag("editor_settings_topbar_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Settings,
+                    contentDescription = "Studio Settings & Language Management",
+                    tint = SilverMuted,
                     modifier = Modifier.size(18.dp)
                 )
             }
@@ -1304,7 +1340,7 @@ private fun ActiveInspectorHost(
     onExportSrt: () -> Unit,
     onPickCutoutBackground: () -> Unit,
     onToggleVoiceover: () -> Unit,
-    onToggleOfflineMic: (String) -> Unit,
+    onToggleOfflineMic: (String, CaptionOutputMode) -> Unit,
     activeAiProviderBadge: String,
     requiresGoogleSignInForCloud: Boolean = false,
     onGoogleSignIn: () -> Unit = {},
@@ -1509,9 +1545,16 @@ private fun ActiveInspectorHost(
                 autoCaptionError = state.autoCaptionError,
                 isLiveMicDictating = state.isLiveMicDictating,
                 liveMicPartialText = state.liveMicPartialText,
-                onRunGeminiAutoCaptions = { lang -> viewModel.runGeminiAutoCaptions(lang) },
-                onRunOfflineVideoAutoCaptions = { lang -> viewModel.runOfflineVideoAutoCaptions(lang) },
+                onRunGeminiAutoCaptions = { srcLang, mode, targetLang ->
+                    viewModel.runGeminiAutoCaptions(srcLang, mode, targetLang)
+                },
+                onRunOfflineVideoAutoCaptions = { srcLang, mode, targetLang ->
+                    viewModel.runOfflineVideoAutoCaptions(srcLang, mode, targetLang)
+                },
                 onToggleOfflineMicDictation = onToggleOfflineMic,
+                onTransformExistingCaptions = { mode, targetLang ->
+                    viewModel.transformExistingCaptions(mode, targetLang)
+                },
                 onOpenAiLoginSetup = onOpenAiLoginSetup,
                 onOpenOfflineModelsSetup = onOpenOfflineModelsSetup,
                 onOpenLocalTtsStudio = onOpenLocalTtsStudio,

@@ -23,12 +23,14 @@ import com.example.data.StudioRepository
 import com.example.security.FirebaseAuthManager
 import com.example.ui.screens.EditorScreen
 import com.example.ui.screens.ProjectHubScreen
+import com.example.ui.screens.SettingsScreen
 import com.example.ui.theme.LumaCutTheme
 import com.example.viewmodel.EditorViewModel
 import com.example.viewmodel.ProjectsViewModel
 
 const val ROUTE_PROJECT_HUB = "project_hub"
 const val ROUTE_EDITOR_PATTERN = "editor/{projectId}"
+const val ROUTE_SETTINGS = "settings"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -73,6 +75,9 @@ private fun LumaCutApp() {
                 viewModel = projectsViewModel,
                 onOpenProject = { projectId ->
                     navController.navigate("editor/$projectId")
+                },
+                onOpenSettings = {
+                    navController.navigate(ROUTE_SETTINGS)
                 }
             )
         }
@@ -88,6 +93,13 @@ private fun LumaCutApp() {
             )
             EditorScreen(
                 viewModel = editorViewModel,
+                onNavigateBack = { navController.popBackStack() },
+                onOpenSettings = { navController.navigate(ROUTE_SETTINGS) }
+            )
+        }
+
+        composable(ROUTE_SETTINGS) {
+            SettingsScreen(
                 onNavigateBack = { navController.popBackStack() }
             )
         }

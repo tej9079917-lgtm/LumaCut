@@ -126,6 +126,54 @@ class OfflineSpeechModelManager private constructor(private val appContext: Cont
     private val _needsSpeechServicesSetup = MutableStateFlow(false)
     val needsSpeechServicesSetup: StateFlow<Boolean> = _needsSpeechServicesSetup.asStateFlow()
 
+    private val prefs = appContext.getSharedPreferences("lumacut_offline_lang_prefs", Context.MODE_PRIVATE)
+
+    private val _disabledOfflineTags = MutableStateFlow(
+        prefs.getStringSet("disabled_offline_tags", emptySet()).orEmpty().toSet()
+    )
+    val disabledOfflineTags: StateFlow<Set<String>> = _disabledOfflineTags.asStateFlow()
+
+    fun isOfflineToggleOn(pack: OfflineLanguagePackState): Boolean {
+        val tagKey = pack.spec.bcp47.lowercase(Locale.US)
+        if (tagKey in _disabledOfflineTags.value) return false
+        return pack.status == OfflinePackStatus.INSTALLED || pack.status == OfflinePackStatus.DOWNLOADING
+    }
+
+    /**
+     * Toggles offline model download status from Settings -> Language Management:
+     * - Enabling starts the official Android SpeechRecognizer on-device model download.
+     * - Disabling clears active download UI state and disables offline preference for this language
+     *   in LumaCut (system packs managed by Google Speech Services can also be removed in Speech Settings).
+     */
+    fun toggleLanguageDownload(spec: OfflineLanguageSpec, enable: Boolean) {
+        val tagKey = spec.bcp47.lowercase(Locale.US)
+        if (enable) {
+            val updated = _disabledOfflineTags.value - tagKey
+            _disabledOfflineTags.value = updated
+            prefs.edit().putStringSet("disabled_offline_tags", updated).apply()
+            val current = _packs.value.firstOrNull { it.spec.bcp47.equals(spec.bcp47, ignoreCase = true) }
+            if (current?.status == OfflinePackStatus.INSTALLED) {
+                _statusMessage.value = "${spec.displayName} offline pack re-enabled."
+            } else {
+                downloadLanguagePack(spec)
+            }
+        } else {
+            val updated = _disabledOfflineTags.value + tagKey
+            _disabledOfflineTags.value = updated
+            prefs.edit().putStringSet("disabled_offline_tags", updated).apply()
+            val current = _packs.value.firstOrNull { it.spec.bcp47.equals(spec.bcp47, ignoreCase = true) }
+            if (current?.status == OfflinePackStatus.DOWNLOADING) {
+                updatePack(
+                    spec.bcp47,
+                    OfflinePackStatus.AVAILABLE_TO_DOWNLOAD,
+                    0,
+                    "Offline download paused — toggle ON anytime to resume"
+                )
+            }
+            _statusMessage.value = "${spec.displayName} offline mode turned off (use Speech Settings to remove system pack)."
+        }
+    }
+
     private fun checkDeviceCapable(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
         return SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext) ||

@@ -81,6 +81,8 @@ import com.example.ai.MultiProviderTranscriptionEngine
 import com.example.media.OfflineLanguagePackState
 import com.example.media.OfflinePackStatus
 import com.example.media.OfflineSpeechModelManager
+import com.example.media.SpeechDiagnosticReport
+import com.example.media.SpeechServicesDiagnosticEngine
 import com.example.security.AiCaptionProvider
 import com.example.security.FirebaseAuthManager
 import com.example.security.SecureCredentialStore
@@ -128,9 +130,11 @@ fun AiCaptionSetupBottomSheet(
     var verifyMessage by remember { mutableStateOf<String?>(null) }
     var verifyError by remember { mutableStateOf<String?>(null) }
     var langSearch by remember { mutableStateOf("") }
+    var speechDiagnostic by remember { mutableStateOf(SpeechDiagnosticReport(isChecking = true)) }
 
     LaunchedEffect(Unit) {
         offlineManager.refreshInstalledModels()
+        speechDiagnostic = SpeechServicesDiagnosticEngine.runFullDiagnostic(context)
     }
 
     ModalBottomSheet(
@@ -518,38 +522,17 @@ fun AiCaptionSetupBottomSheet(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = { openAndroidSpeechSettings(context) },
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(38.dp)
-                                .testTag("open_speech_settings_button")
-                        ) {
-                            Text(
-                                text = "Speech Settings",
-                                color = if (needsSpeechSetup) CinemaAmber else ChalkWhite,
-                                style = MaterialTheme.typography.labelSmall
-                            )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    SpeechServicesDiagnosticCard(
+                        report = speechDiagnostic,
+                        onRunDiagnostic = {
+                            scope.launch {
+                                speechDiagnostic = speechDiagnostic.copy(isChecking = true)
+                                offlineManager.refreshInstalledModels()
+                                speechDiagnostic = SpeechServicesDiagnosticEngine.runFullDiagnostic(context)
+                            }
                         }
-                        OutlinedButton(
-                            onClick = { openGoogleSpeechServicesApp(context) },
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(38.dp)
-                                .testTag("open_google_speech_app_button")
-                        ) {
-                            Text(
-                                text = "Enable Google Speech",
-                                color = if (needsSpeechSetup) CinemaAmber else TrackOverlayEmerald,
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-                    }
+                    )
 
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(

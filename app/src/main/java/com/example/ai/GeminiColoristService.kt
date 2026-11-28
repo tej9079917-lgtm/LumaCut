@@ -380,6 +380,8 @@ object GeminiColoristService {
         clipStartOnTimelineMs: Long,
         clipDurationMs: Long,
         languageHint: String = "Auto",
+        outputMode: CaptionOutputMode = CaptionOutputMode.ORIGINAL_SCRIPT,
+        targetOutputLanguage: String = "English",
         maxWordsPerLine: Int = 5
     ): Result<List<CaptionClip>> {
         if (audioBytes.isEmpty()) {
@@ -388,14 +390,19 @@ object GeminiColoristService {
 
         return try {
             val app = requireFirebaseApp(context)
-            val langInstruction = if (languageHint.equals("Auto", ignoreCase = true) || languageHint.isBlank()) {
-                "Detect the spoken language automatically and transcribe accurately in the speaker's language."
+            val sourceLangDesc = if (languageHint.equals("Auto", ignoreCase = true) || languageHint.isBlank()) {
+                "automatically detect the spoken language in the audio"
             } else {
-                "The spoken audio is in $languageHint. Transcribe accurately in $languageHint script (preserving natural spoken words and punctuation)."
+                "the spoken audio is in $languageHint"
             }
+            val outputInstruction = buildCaptionOutputPromptInstruction(
+                sourceLangDesc = sourceLangDesc,
+                outputMode = outputMode,
+                targetOutputLanguage = targetOutputLanguage
+            )
             val prompt = buildString {
-                append("Listen carefully to the attached audio track and transcribe every spoken phrase into timed video subtitles. ")
-                append("$langInstruction ")
+                append("Listen carefully to the attached audio track and create timed video subtitles for every spoken phrase. ")
+                append("$outputInstruction ")
                 append("Keep each subtitle segment concise (2 to ${maxWordsPerLine.coerceIn(3, 8)} words) with accurate startMs and endMs timestamps ")
                 append("in milliseconds between 0 and ${clipDurationMs.coerceAtLeast(1000L)}. ")
                 append("Return valid JSON with a segments array. If there is no human speech, return {\"segments\": []}.")
@@ -457,6 +464,87 @@ object GeminiColoristService {
             }
             Result.failure(IllegalStateException(friendly, e))
         }
+    }
+
+    /**
+     * Translates or phonetically romanizes existing timeline [captions] via Firebase AI Logic Gemini
+     * while preserving exact start/end timestamps, styling, fonts, and karaoke animation presets.
+     */
+    suspend fun transformCaptions(
+        context: Context,
+        captions: List<CaptionClip>,
+        outputMode: CaptionOutputMode,
+        targetOutputLanguage: String
+    ): Result<List<CaptionClip>> {
+        if (captions.isEmpty()) {
+            return Result.failure(IllegalArgumentException("No captions on timeline to convert."))
+        }
+        return try {
+            val app = requireFirebaseApp(context)
+            val indexedLines = captions.mapIndexed { idx, c -> "${idx + 1}. ${c.text}" }.joinToString("\n")
+            val prompt = buildTransformCaptionsPrompt(
+                indexedLines = indexedLines,
+                count = captions.size,
+                outputMode = outputMode,
+                targetOutputLanguage = targetOutputLanguage
+            )
+            val response = withTimeout(REQUEST_TIMEOUT_MS) {
+                audioTranscriptionModel(app).generateContent(prompt)
+            }
+            val rawJson = response.text?.let { CaptionSegmentNormalizer.stripJsonMarkdownFences(it) }
+                ?.takeIf { it.isNotEmpty() }
+                ?: return Result.failure(IllegalStateException("Gemini returned an empty translation response."))
+
+            val arr = JSONObject(rawJson).optJSONArray("segments")
+                ?: return Result.failure(IllegalStateException("Could not parse translated caption lines."))
+
+            val updated = captions.mapIndexed { idx, original ->
+                val translated = arr.optJSONObject(idx)?.optString("text", "")?.trim().orEmpty()
+                if (translated.isNotEmpty()) original.copy(text = translated) else original
+            }
+            Result.success(updated)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            Log.e(TAG, "Caption transform failed", e)
+            Result.failure(IllegalStateException(e.localizedMessage ?: "Failed to convert captions."))
+        }
+    }
+
+    fun buildCaptionOutputPromptInstruction(
+        sourceLangDesc: String,
+        outputMode: CaptionOutputMode,
+        targetOutputLanguage: String
+    ): String = when (outputMode) {
+        CaptionOutputMode.ORIGINAL_SCRIPT ->
+            "Note that $sourceLangDesc. Transcribe accurately in the speaker's original language and native script."
+        CaptionOutputMode.TRANSLATE ->
+            "Note that $sourceLangDesc. Listen to the spoken words and TRANSLATE every subtitle phrase cleanly and naturally into $targetOutputLanguage."
+        CaptionOutputMode.PHONETIC_ENGLISH ->
+            "Note that $sourceLangDesc. DO NOT translate the meaning into English. Instead, write EVERY spoken word phonetically using natural English (Latin A-Z) letters so an English reader pronounces the exact words spoken in the audio (for example, Telugu 'మీరు ఎలా ఉన్నారు' must be written 'Meeru ela unnaru', Hindi 'कैसे हो भाई' must be written 'Kaise ho bhai')."
+    }
+
+    fun buildTransformCaptionsPrompt(
+        indexedLines: String,
+        count: Int,
+        outputMode: CaptionOutputMode,
+        targetOutputLanguage: String
+    ): String = buildString {
+        when (outputMode) {
+            CaptionOutputMode.TRANSLATE -> {
+                append("Translate each numbered subtitle line below into natural, concise $targetOutputLanguage suitable for video captions. ")
+            }
+            CaptionOutputMode.PHONETIC_ENGLISH -> {
+                append("Convert each numbered subtitle line below into PHONETIC ENGLISH (Latin A-Z letters) that pronounces the exact spoken words ")
+                append("WITHOUT translating the meaning (e.g., Telugu 'నమస్కారం అందరికీ' -> 'Namaskaram andariki', Hindi 'सब बढ़िया है' -> 'Sab badhiya hai'). ")
+            }
+            CaptionOutputMode.ORIGINAL_SCRIPT -> {
+                append("Clean up punctuation for each numbered subtitle line below while preserving the original language. ")
+            }
+        }
+        append("Return ONLY valid JSON {\"segments\":[{\"startMs\":0,\"endMs\":1000,\"text\":\"...\"}]} ")
+        append("with EXACTLY $count items in the exact same order.\n\n")
+        append(indexedLines)
     }
 
     private fun scaleForVision(src: Bitmap, maxDim: Int): Bitmap {
