@@ -123,6 +123,12 @@ import com.example.model.MaskSettings
 import com.example.model.OverlayType
 import com.example.model.TransitionSpec
 import com.example.model.formatTimecode
+import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.QueuePlayNext
+import com.example.data.RenderJobStatus
+import com.example.media.RenderQueueManager
+import com.example.security.SecureCredentialStore
+import com.example.ui.components.AiCaptionSetupBottomSheet
 import com.example.ui.components.AiCreativeStudioInspector
 import com.example.ui.components.AudioMixerInspector
 import com.example.ui.components.CanvasAspectInspector
@@ -142,12 +148,14 @@ import com.example.ui.components.MaskAndTransformInspector
 import com.example.ui.components.MultilayerTimeline
 import com.example.ui.components.PreviewStage
 import com.example.ui.components.ProCameraModal
+import com.example.ui.components.RenderQueueBottomSheet
 import com.example.ui.components.SpeedInspector
 import com.example.ui.components.TextStyleInspector
 import com.example.ui.components.TransformCropZoomInspector
 import com.example.ui.components.TransitionInspector
 import com.example.ui.components.VideoOverlayChromaInspector
 import com.example.ui.components.VisualFxInspector
+import com.example.ui.components.YouTubeStudioBottomSheet
 import com.example.ui.theme.ActiveRail
 import com.example.ui.theme.AmberContainer
 import com.example.ui.theme.BorderHairline
@@ -183,6 +191,18 @@ fun EditorScreen(
     val context = LocalContext.current
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val fonts by viewModel.availableFonts.collectAsStateWithLifecycle()
+    val renderQueueManager = remember(context) { RenderQueueManager.getInstance(context) }
+    val renderJobs by renderQueueManager.jobs.collectAsStateWithLifecycle()
+    val credentialStore = remember(context) { SecureCredentialStore.getInstance(context) }
+    val aiCredState by credentialStore.aiState.collectAsStateWithLifecycle()
+    val activeQueueCount = renderJobs.count {
+        it.status == RenderJobStatus.RENDERING || it.status == RenderJobStatus.QUEUED
+    }
+    var aiSetupSheetTab by remember { mutableStateOf<Int?>(null) }
+    var showRenderQueueSheet by remember { mutableStateOf(false) }
+    var youtubeSheetTab by remember { mutableStateOf<Int?>(null) }
+    var youtubeUploadUri by remember { mutableStateOf<String?>(null) }
+    var youtubeUploadTitle by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
     var showRenameDialog by remember { mutableStateOf(false) }
 
@@ -444,7 +464,10 @@ fun EditorScreen(
                             onExportSrt = onExportSrtAction,
                             onPickCutoutBackground = onPickCutoutBgAction,
                             onToggleVoiceover = onToggleVoiceover,
-                            onToggleOfflineMic = onToggleOfflineMic
+                            onToggleOfflineMic = onToggleOfflineMic,
+                            activeAiProviderBadge = aiCredState.activeProvider.shortBadge,
+                            onOpenAiLoginSetup = { aiSetupSheetTab = 0 },
+                            onOpenOfflineModelsSetup = { aiSetupSheetTab = 1 }
                         )
                     },
                     timelineContent = { mod ->
@@ -496,6 +519,13 @@ fun EditorScreen(
                         onToggleAspect = { viewModel.openInspector(InspectorTab.CANVAS) },
                         onSwitchToLandscape = { onToggleOrientation(true) },
                         onOpenProCamera = { viewModel.openProCamera() },
+                        activeQueueCount = activeQueueCount,
+                        onOpenRenderQueue = { showRenderQueueSheet = true },
+                        onOpenYouTube = {
+                            youtubeUploadUri = null
+                            youtubeUploadTitle = state.projectTitle
+                            youtubeSheetTab = 0
+                        },
                         onUndo = { viewModel.undo() },
                         onRedo = { viewModel.redo() },
                         onOpenHistory = { viewModel.openHistorySheet() },
@@ -599,7 +629,10 @@ fun EditorScreen(
                                     onExportSrt = onExportSrtAction,
                                     onPickCutoutBackground = onPickCutoutBgAction,
                                     onToggleVoiceover = onToggleVoiceover,
-                                    onToggleOfflineMic = onToggleOfflineMic
+                                    onToggleOfflineMic = onToggleOfflineMic,
+                                    activeAiProviderBadge = aiCredState.activeProvider.shortBadge,
+                                    onOpenAiLoginSetup = { aiSetupSheetTab = 0 },
+                                    onOpenOfflineModelsSetup = { aiSetupSheetTab = 1 }
                                 )
                             }
                         }
@@ -659,8 +692,52 @@ fun EditorScreen(
             exportState = state.exportState,
             onUpdateConfig = { viewModel.updateExportConfig(it) },
             onStartExport = { viewModel.startMp4Export() },
+            onQueueBackgroundExport = { viewModel.queueCurrentProjectForBackgroundExport() },
+            onUploadToYouTube = { uri, title ->
+                viewModel.closeExportSheet()
+                youtubeUploadUri = uri
+                youtubeUploadTitle = title
+                youtubeSheetTab = 1
+            },
             onCancelExport = { viewModel.cancelMp4Export() },
             onDismiss = { viewModel.closeExportSheet() }
+        )
+    }
+
+    if (showRenderQueueSheet) {
+        RenderQueueBottomSheet(
+            jobs = renderJobs,
+            onCancelJob = { renderQueueManager.cancelJob(it) },
+            onRetryJob = { renderQueueManager.retryJob(it) },
+            onRemoveJob = { renderQueueManager.removeJob(it) },
+            onClearFinished = { renderQueueManager.clearFinished() },
+            onUploadToYouTube = { uri, title ->
+                showRenderQueueSheet = false
+                youtubeUploadUri = uri
+                youtubeUploadTitle = title
+                youtubeSheetTab = 1
+            },
+            onDismiss = { showRenderQueueSheet = false }
+        )
+    }
+
+    aiSetupSheetTab?.let { tabIdx ->
+        AiCaptionSetupBottomSheet(
+            initialTab = tabIdx,
+            onSelectLanguageAndTranscribeOffline = { lang ->
+                viewModel.runOfflineVideoAutoCaptions(lang)
+            },
+            onDismiss = { aiSetupSheetTab = null }
+        )
+    }
+
+    youtubeSheetTab?.let { tabIdx ->
+        YouTubeStudioBottomSheet(
+            initialTab = tabIdx,
+            exportVideoUri = youtubeUploadUri,
+            defaultExportTitle = youtubeUploadTitle.ifBlank { state.projectTitle },
+            onImportedAsset = { asset -> viewModel.importYouTubeAssetToTimeline(asset) },
+            onDismiss = { youtubeSheetTab = null }
         )
     }
 
@@ -726,6 +803,9 @@ private fun StudioTopBar(
     onToggleAspect: () -> Unit,
     onSwitchToLandscape: () -> Unit,
     onOpenProCamera: () -> Unit,
+    activeQueueCount: Int = 0,
+    onOpenRenderQueue: () -> Unit = {},
+    onOpenYouTube: () -> Unit = {},
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onOpenHistory: () -> Unit,
@@ -780,6 +860,30 @@ private fun StudioTopBar(
                     imageVector = Icons.Default.ScreenRotation,
                     contentDescription = "Switch to Horizontal KineMaster Mode",
                     tint = CinemaAmber,
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+
+            IconButton(
+                onClick = onOpenYouTube,
+                modifier = Modifier.size(34.dp).testTag("youtube_studio_topbar_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PlayCircle,
+                    contentDescription = "YouTube Import and Export",
+                    tint = ErrorCrimson,
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+
+            IconButton(
+                onClick = onOpenRenderQueue,
+                modifier = Modifier.size(34.dp).testTag("render_queue_topbar_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.QueuePlayNext,
+                    contentDescription = "Background Render Queue",
+                    tint = if (activeQueueCount > 0) TrackOverlayEmerald else SilverMuted,
                     modifier = Modifier.size(19.dp)
                 )
             }
@@ -1003,7 +1107,10 @@ private fun ActiveInspectorHost(
     onExportSrt: () -> Unit,
     onPickCutoutBackground: () -> Unit,
     onToggleVoiceover: () -> Unit,
-    onToggleOfflineMic: () -> Unit
+    onToggleOfflineMic: () -> Unit,
+    activeAiProviderBadge: String,
+    onOpenAiLoginSetup: () -> Unit,
+    onOpenOfflineModelsSetup: () -> Unit
 ) {
     when (state.activeInspector) {
         InspectorTab.FILTERS -> {
@@ -1195,13 +1302,17 @@ private fun ActiveInspectorHost(
                 selectedCaption = state.selectedCaption ?: state.timeline.captions.firstOrNull(),
                 safeZone = state.timeline.safeZoneOverlay,
                 availableFonts = fonts,
+                activeAiProviderBadge = activeAiProviderBadge,
                 autoCaptionLoading = state.autoCaptionLoading,
                 autoCaptionStatus = state.autoCaptionStatus,
                 autoCaptionError = state.autoCaptionError,
                 isLiveMicDictating = state.isLiveMicDictating,
                 liveMicPartialText = state.liveMicPartialText,
                 onRunGeminiAutoCaptions = { lang -> viewModel.runGeminiAutoCaptions(lang) },
+                onRunOfflineVideoAutoCaptions = { lang -> viewModel.runOfflineVideoAutoCaptions(lang) },
                 onToggleOfflineMicDictation = onToggleOfflineMic,
+                onOpenAiLoginSetup = onOpenAiLoginSetup,
+                onOpenOfflineModelsSetup = onOpenOfflineModelsSetup,
                 onAddCaption = { viewModel.addCaptionAtPlayhead() },
                 onSelectCaption = { id ->
                     viewModel.selectItem(SelectedItem.CaptionItem(id), InspectorTab.CAPTIONS)

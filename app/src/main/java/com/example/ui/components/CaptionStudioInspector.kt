@@ -22,10 +22,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.OfflineBolt
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -53,6 +56,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.media.FontResolver
+import com.example.media.OfflineLanguageCatalog
 import com.example.model.CaptionAnimationPreset
 import com.example.model.CaptionClip
 import com.example.model.SafeZoneOverlay
@@ -68,6 +72,7 @@ import com.example.ui.theme.InspectorCharcoal
 import com.example.ui.theme.ObsidianBg
 import com.example.ui.theme.OnAmber
 import com.example.ui.theme.SilverMuted
+import com.example.ui.theme.TrackOverlayEmerald
 import kotlin.math.roundToInt
 
 @Composable
@@ -76,13 +81,17 @@ fun CaptionStudioInspector(
     selectedCaption: CaptionClip?,
     safeZone: SafeZoneOverlay,
     availableFonts: List<StudioFont>,
+    activeAiProviderBadge: String = "Built-in Gemini",
     autoCaptionLoading: Boolean = false,
     autoCaptionStatus: String? = null,
     autoCaptionError: String? = null,
     isLiveMicDictating: Boolean = false,
     liveMicPartialText: String = "",
     onRunGeminiAutoCaptions: (String) -> Unit = {},
+    onRunOfflineVideoAutoCaptions: (String) -> Unit = {},
     onToggleOfflineMicDictation: () -> Unit = {},
+    onOpenAiLoginSetup: () -> Unit = {},
+    onOpenOfflineModelsSetup: () -> Unit = {},
     onAddCaption: () -> Unit,
     onSelectCaption: (String) -> Unit,
     onUpdateCaption: ((CaptionClip) -> CaptionClip) -> Unit,
@@ -100,7 +109,7 @@ fun CaptionStudioInspector(
         listOf(0xFFFFFFFFL, 0xFFFDE047L, 0xFF38BDF8L, 0xFF34D399L, 0xFF0B0C0EL)
     }
     var selectedLanguage by remember { mutableStateOf("Auto") }
-    val languages = remember { listOf("Auto", "English", "Hindi", "Telugu", "Spanish", "Tamil") }
+    val languages = remember { OfflineLanguageCatalog.captionChipOptions }
 
     Surface(
         color = InspectorCharcoal,
@@ -150,13 +159,52 @@ fun CaptionStudioInspector(
                     .padding(10.dp),
                 verticalArrangement = Arrangement.spacedBy(7.dp)
             ) {
-                Text(
-                    text = "Auto Captions (Gemini AI + Offline Mic)",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = CinemaAmber
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Engine: $activeAiProviderBadge",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = CinemaAmber,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(ActiveRail)
+                                .border(1.dp, CinemaAmber.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                                .clickable { onOpenAiLoginSetup() }
+                                .padding(horizontal = 7.dp, vertical = 4.dp)
+                                .testTag("btn_open_ai_login")
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Icon(Icons.Default.Key, contentDescription = null, tint = CinemaAmber, modifier = Modifier.size(12.dp))
+                                Text("AI Login", style = MaterialTheme.typography.labelSmall, color = ChalkWhite)
+                            }
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(ActiveRail)
+                                .border(1.dp, TrackOverlayEmerald.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                                .clickable { onOpenOfflineModelsSetup() }
+                                .padding(horizontal = 7.dp, vertical = 4.dp)
+                                .testTag("btn_open_offline_models")
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Icon(Icons.Default.CloudDownload, contentDescription = null, tint = TrackOverlayEmerald, modifier = Modifier.size(12.dp))
+                                Text("Offline Models", style = MaterialTheme.typography.labelSmall, color = ChalkWhite)
+                            }
+                        }
+                    }
+                }
 
-                // Language hint chips for Gemini transcription
+                // 18+ Language selector chips (shared across Cloud AI & Offline Models)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -188,7 +236,7 @@ fun CaptionStudioInspector(
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     FilledTonalButton(
                         onClick = { onRunGeminiAutoCaptions(selectedLanguage) },
@@ -206,15 +254,32 @@ fun CaptionStudioInspector(
                             CircularProgressIndicator(
                                 color = OnAmber,
                                 strokeWidth = 2.dp,
-                                modifier = Modifier.size(15.dp)
+                                modifier = Modifier.size(14.dp)
                             )
-                            Spacer(modifier = Modifier.width(5.dp))
-                            Text("Transcribing…", style = MaterialTheme.typography.labelSmall, maxLines = 1)
-                        } else {
-                            Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(15.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("AI Transcribe", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                            Text("Working…", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                        } else {
+                            Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text("Cloud AI", style = MaterialTheme.typography.labelSmall, maxLines = 1)
                         }
+                    }
+
+                    FilledTonalButton(
+                        onClick = { onRunOfflineVideoAutoCaptions(selectedLanguage) },
+                        enabled = !autoCaptionLoading && !isLiveMicDictating,
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = TrackOverlayEmerald.copy(alpha = 0.22f),
+                            contentColor = TrackOverlayEmerald
+                        ),
+                        modifier = Modifier
+                            .weight(1.05f)
+                            .height(38.dp)
+                            .testTag("btn_auto_captions_offline_video")
+                    ) {
+                        Icon(Icons.Default.OfflineBolt, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text("Offline AI", style = MaterialTheme.typography.labelSmall, maxLines = 1)
                     }
 
                     FilledTonalButton(
@@ -225,7 +290,7 @@ fun CaptionStudioInspector(
                             contentColor = ChalkWhite
                         ),
                         modifier = Modifier
-                            .weight(1f)
+                            .weight(0.85f)
                             .height(38.dp)
                             .testTag("btn_auto_captions_mic")
                     ) {

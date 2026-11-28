@@ -26,6 +26,8 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.MovieCreation
+import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.QueuePlayNext
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Storage
@@ -81,6 +83,8 @@ fun ExportBottomSheet(
     exportState: ExportState,
     onUpdateConfig: (ExportConfig) -> Unit,
     onStartExport: () -> Unit,
+    onQueueBackgroundExport: () -> Unit = {},
+    onUploadToYouTube: (outputUri: String, title: String) -> Unit = { _, _ -> },
     onCancelExport: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -380,7 +384,23 @@ fun ExportBottomSheet(
                         Icon(Icons.Default.MovieCreation, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Render ${config.resolution.label} MP4 to Gallery",
+                            text = "Render ${config.resolution.label} MP4 Now",
+                            style = MaterialTheme.typography.titleSmall
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedButton(
+                        onClick = onQueueBackgroundExport,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("queue_background_export_button")
+                    ) {
+                        Icon(Icons.Default.QueuePlayNext, contentDescription = null, tint = CinemaAmber, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Add to Background Render Queue",
+                            color = ChalkWhite,
                             style = MaterialTheme.typography.titleSmall
                         )
                     }
@@ -451,6 +471,22 @@ fun ExportBottomSheet(
                             color = SilverMuted
                         )
                         Spacer(modifier = Modifier.height(18.dp))
+                        Button(
+                            onClick = { onUploadToYouTube(exportState.contentUri, projectTitle) },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = ErrorCrimson,
+                                contentColor = ChalkWhite
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("export_upload_youtube_button")
+                        ) {
+                            Icon(Icons.Default.PlayCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Upload to YouTube", style = MaterialTheme.typography.titleSmall)
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)

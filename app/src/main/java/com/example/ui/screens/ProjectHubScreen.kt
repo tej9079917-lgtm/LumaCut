@@ -31,13 +31,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FontDownload
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.QueuePlayNext
 import androidx.compose.material.icons.filled.VideoSettings
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -70,6 +74,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -79,10 +84,15 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.example.R
 import com.example.data.ProjectSummary
+import com.example.data.RenderJobStatus
 import com.example.media.FontResolver
+import com.example.media.RenderQueueManager
 import com.example.model.AspectRatio
 import com.example.model.StudioFont
 import com.example.model.formatShortDuration
+import com.example.ui.components.AiCaptionSetupBottomSheet
+import com.example.ui.components.RenderQueueBottomSheet
+import com.example.ui.components.YouTubeStudioBottomSheet
 import com.example.ui.theme.ActiveRail
 import com.example.ui.theme.AmberContainer
 import com.example.ui.theme.BorderHairline
@@ -94,6 +104,7 @@ import com.example.ui.theme.ObsidianBg
 import com.example.ui.theme.OnAmber
 import com.example.ui.theme.SilverMuted
 import com.example.ui.theme.StudioSlate
+import com.example.ui.theme.TrackOverlayEmerald
 import com.example.viewmodel.ProjectsViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -105,13 +116,26 @@ fun ProjectHubScreen(
     viewModel: ProjectsViewModel,
     onOpenProject: (String) -> Unit
 ) {
+    val context = LocalContext.current
     val projects by viewModel.projects.collectAsStateWithLifecycle()
     val fonts by viewModel.fonts.collectAsStateWithLifecycle()
+    val renderQueueManager = remember(context) { RenderQueueManager.getInstance(context) }
+    val renderJobs by renderQueueManager.jobs.collectAsStateWithLifecycle()
+    val bannerState by renderQueueManager.bannerState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
     var showNewProjectDialog by remember { mutableStateOf(false) }
     var showFontSheet by remember { mutableStateOf(false) }
+    var showRenderQueueSheet by remember { mutableStateOf(false) }
+    var showAiSetupSheet by remember { mutableStateOf(false) }
+    var youtubeSheetTab by remember { mutableStateOf<Int?>(null) }
+    var youtubeUploadUri by remember { mutableStateOf<String?>(null) }
+    var youtubeUploadTitle by remember { mutableStateOf("") }
     var renameTarget by remember { mutableStateOf<ProjectSummary?>(null) }
+
+    val activeQueueCount = renderJobs.count {
+        it.status == RenderJobStatus.RENDERING || it.status == RenderJobStatus.QUEUED
+    }
 
     val fontPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -148,9 +172,63 @@ fun ProjectHubScreen(
                 StudioHeroBanner(
                     projectCount = projects.size,
                     customFontCount = fonts.count { it.isCustom },
+                    activeQueueCount = activeQueueCount,
                     onNewProject = { showNewProjectDialog = true },
-                    onOpenFontStudio = { showFontSheet = true }
+                    onOpenFontStudio = { showFontSheet = true },
+                    onOpenRenderQueue = { showRenderQueueSheet = true },
+                    onOpenYouTube = {
+                        youtubeUploadUri = null
+                        youtubeUploadTitle = ""
+                        youtubeSheetTab = 0
+                    },
+                    onOpenAiSetup = { showAiSetupSheet = true }
                 )
+            }
+
+            if (bannerState.isRunning || activeQueueCount > 0) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(StudioSlate)
+                            .border(1.dp, CinemaAmber.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                            .clickable { showRenderQueueSheet = true }
+                            .padding(12.dp)
+                            .testTag("hub_active_render_banner")
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.QueuePlayNext, contentDescription = null, tint = CinemaAmber, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Rendering: ${bannerState.activeTitle.ifBlank { "Queued jobs" }}",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = ChalkWhite,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "${(bannerState.progress * 100f).toInt()}%",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = CinemaAmber
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LinearProgressIndicator(
+                            progress = { bannerState.progress.coerceIn(0.02f, 1f) },
+                            color = CinemaAmber,
+                            trackColor = ActiveRail,
+                            modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp))
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "${bannerState.stageMessage} • Tap to manage queue",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = SilverMuted
+                        )
+                    }
+                }
             }
 
             // Section Header
@@ -184,6 +262,14 @@ fun ProjectHubScreen(
                     ProjectCard(
                         project = project,
                         onOpen = { onOpenProject(project.id) },
+                        onQueueBackgroundRender = {
+                            renderQueueManager.enqueueProject(
+                                projectId = project.id,
+                                projectTitle = project.title,
+                                aspectRatio = project.aspectRatio
+                            )
+                            viewModel.emitToast("Queued '${project.title}' for background export")
+                        },
                         onRename = { renameTarget = project },
                         onDuplicate = { viewModel.duplicateProject(project.id) },
                         onDelete = { viewModel.deleteProject(project.id) }
@@ -226,19 +312,59 @@ fun ProjectHubScreen(
             onDismiss = { showFontSheet = false }
         )
     }
+
+    if (showRenderQueueSheet) {
+        RenderQueueBottomSheet(
+            jobs = renderJobs,
+            onCancelJob = { renderQueueManager.cancelJob(it) },
+            onRetryJob = { renderQueueManager.retryJob(it) },
+            onRemoveJob = { renderQueueManager.removeJob(it) },
+            onClearFinished = { renderQueueManager.clearFinished() },
+            onUploadToYouTube = { uri, title ->
+                showRenderQueueSheet = false
+                youtubeUploadUri = uri
+                youtubeUploadTitle = title
+                youtubeSheetTab = 1
+            },
+            onDismiss = { showRenderQueueSheet = false }
+        )
+    }
+
+    if (showAiSetupSheet) {
+        AiCaptionSetupBottomSheet(
+            initialTab = 0,
+            onDismiss = { showAiSetupSheet = false }
+        )
+    }
+
+    youtubeSheetTab?.let { tabIdx ->
+        YouTubeStudioBottomSheet(
+            initialTab = tabIdx,
+            exportVideoUri = youtubeUploadUri,
+            defaultExportTitle = youtubeUploadTitle,
+            onImportedAsset = { asset ->
+                viewModel.createProjectFromYouTubeAsset(asset, onOpenProject)
+            },
+            onDismiss = { youtubeSheetTab = null }
+        )
+    }
 }
 
 @Composable
 private fun StudioHeroBanner(
     projectCount: Int,
     customFontCount: Int,
+    activeQueueCount: Int,
     onNewProject: () -> Unit,
-    onOpenFontStudio: () -> Unit
+    onOpenFontStudio: () -> Unit,
+    onOpenRenderQueue: () -> Unit,
+    onOpenYouTube: () -> Unit,
+    onOpenAiSetup: () -> Unit
 ) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(212.dp)
+            .height(236.dp)
             .clip(RoundedCornerShape(18.dp))
             .border(1.dp, BorderHairline, RoundedCornerShape(18.dp))
     ) {
@@ -265,7 +391,7 @@ private fun StudioHeroBanner(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(18.dp),
+                .padding(16.dp),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             Row(
@@ -302,14 +428,69 @@ private fun StudioHeroBanner(
                 }
             }
 
+            // Quick Studio Bridge Row: YouTube, Render Queue, AI & Offline Models
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilledTonalButton(
+                    onClick = onOpenYouTube,
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = InspectorCharcoal.copy(alpha = 0.88f),
+                        contentColor = ChalkWhite
+                    ),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                    modifier = Modifier.weight(1f).height(38.dp).testTag("hub_youtube_button")
+                ) {
+                    Icon(Icons.Default.PlayCircle, contentDescription = null, tint = ErrorCrimson, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("YouTube", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                }
+                FilledTonalButton(
+                    onClick = onOpenRenderQueue,
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = InspectorCharcoal.copy(alpha = 0.88f),
+                        contentColor = ChalkWhite
+                    ),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                    modifier = Modifier.weight(1f).height(38.dp).testTag("hub_render_queue_button")
+                ) {
+                    Icon(
+                        Icons.Default.QueuePlayNext,
+                        contentDescription = null,
+                        tint = if (activeQueueCount > 0) TrackOverlayEmerald else CinemaAmber,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = if (activeQueueCount > 0) "Queue ($activeQueueCount)" else "Queue",
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1
+                    )
+                }
+                FilledTonalButton(
+                    onClick = onOpenAiSetup,
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = InspectorCharcoal.copy(alpha = 0.88f),
+                        contentColor = ChalkWhite
+                    ),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                    modifier = Modifier.weight(1f).height(38.dp).testTag("hub_ai_models_button")
+                ) {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = CinemaAmber, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("AI & Packs", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                }
+            }
+
             Column {
                 Text(
-                    text = if (projectCount == 0) "Multilayer cuts, overlays, transitions & color grading"
+                    text = if (projectCount == 0) "Multilayer cuts, YouTube bridge, background queue & AI captions"
                     else "$projectCount saved project${if (projectCount > 1) "s" else ""} ready offline",
                     style = MaterialTheme.typography.bodySmall,
                     color = SilverMuted
                 )
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(10.dp))
                 Button(
                     onClick = onNewProject,
                     colors = ButtonDefaults.buttonColors(
@@ -381,6 +562,7 @@ private fun EmptyProjectsCard(onNewProject: () -> Unit) {
 private fun ProjectCard(
     project: ProjectSummary,
     onOpen: () -> Unit,
+    onQueueBackgroundRender: () -> Unit,
     onRename: () -> Unit,
     onDuplicate: () -> Unit,
     onDelete: () -> Unit
@@ -493,6 +675,14 @@ private fun ProjectCard(
                     onDismissRequest = { menuExpanded = false },
                     containerColor = InspectorCharcoal
                 ) {
+                    DropdownMenuItem(
+                        text = { Text("Queue Background Render", color = CinemaAmber) },
+                        leadingIcon = { Icon(Icons.Default.QueuePlayNext, contentDescription = null, tint = CinemaAmber) },
+                        onClick = {
+                            menuExpanded = false
+                            onQueueBackgroundRender()
+                        }
+                    )
                     DropdownMenuItem(
                         text = { Text("Rename", color = ChalkWhite) },
                         leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, tint = SilverMuted) },

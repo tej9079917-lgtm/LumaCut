@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.media3.common.util.UnstableApi
 import com.example.ai.AiCreativeIdeasResult
 import com.example.ai.GeminiColoristService
+import com.example.ai.MultiProviderTranscriptionEngine
 import com.example.data.StudioRepository
 import com.example.history.AddAudioClipCommand
 import com.example.history.AddCaptionsCommand
@@ -62,10 +63,14 @@ import com.example.media.CinemaSfxPreset
 import com.example.media.FontResolver
 import com.example.media.Media3ExportEngine
 import com.example.media.OfflineSpeechCaptionEngine
+import com.example.media.OfflineSpeechModelManager
+import com.example.media.RenderQueueManager
 import com.example.media.SpeedRampPreset
 import com.example.media.SrtCodec
 import com.example.media.StudioCreativeTools
 import com.example.media.VoiceoverRecorder
+import com.example.media.YouTubeImportedAsset
+import com.example.security.SecureCredentialStore
 import com.example.model.AiCutoutSettings
 import com.example.model.AspectRatio
 import com.example.model.AudioClip
@@ -2601,6 +2606,85 @@ class EditorViewModel(
         _feedback.tryEmit("Export cancelled")
     }
 
+    fun queueCurrentProjectForBackgroundExport() {
+        pausePlayback()
+        val state = _uiState.value
+        if (state.projectId.isBlank()) return
+        if (state.timeline.mainClips.isEmpty()) {
+            _feedback.tryEmit("Add a video or photo clip before queueing export")
+            return
+        }
+        viewModelScope.launch {
+            repository.saveProjectState(
+                id = state.projectId,
+                title = state.projectTitle,
+                aspectRatio = state.aspectRatio,
+                timeline = state.timeline
+            )
+            RenderQueueManager.getInstance(appContext).enqueueProject(
+                projectId = state.projectId,
+                projectTitle = state.projectTitle,
+                aspectRatio = state.aspectRatio,
+                config = state.exportConfig
+            )
+            _uiState.update { it.copy(showExportSheet = false, exportState = ExportState.Idle) }
+            _feedback.tryEmit("Queued '${state.projectTitle}' in Background Render Queue")
+        }
+    }
+
+    fun importYouTubeAssetToTimeline(asset: YouTubeImportedAsset) {
+        pausePlayback()
+        val addedClips = mutableListOf<MainClip>()
+        val downloaded = asset.downloadedVideoMeta
+        if (downloaded != null) {
+            addedClips.add(
+                MainClip(
+                    mediaType = MainMediaType.VIDEO,
+                    displayName = asset.title.take(40),
+                    uri = downloaded.uriString,
+                    sourceDurationMs = downloaded.durationMs,
+                    trimStartMs = 0L,
+                    trimEndMs = downloaded.durationMs,
+                    thumbnailPath = downloaded.thumbnailPath
+                )
+            )
+        } else if (!asset.thumbnailLocalUri.isNullOrBlank()) {
+            val coverDur = asset.importedCaptions.maxOfOrNull { it.endTimeMs }?.coerceIn(5_000L, 60_000L) ?: 6_000L
+            addedClips.add(
+                MainClip(
+                    mediaType = MainMediaType.IMAGE,
+                    displayName = asset.title.take(40),
+                    uri = asset.thumbnailLocalUri,
+                    sourceDurationMs = coverDur,
+                    trimStartMs = 0L,
+                    trimEndMs = coverDur,
+                    thumbnailPath = null
+                )
+            )
+        }
+
+        if (addedClips.isNotEmpty()) {
+            dispatchCommand(
+                command = AddMainClipsCommand(addedClips, "Import YouTube: ${asset.title.take(24)}"),
+                newSelection = SelectedItem.MainClipItem(addedClips.last().id)
+            )
+        }
+        if (asset.importedCaptions.isNotEmpty()) {
+            dispatchCommand(
+                command = AddCaptionsCommand(asset.importedCaptions, "YouTube Captions (${asset.importedCaptions.size})"),
+                newSelection = SelectedItem.CaptionItem(asset.importedCaptions.first().id),
+                newInspector = InspectorTab.CAPTIONS
+            )
+        }
+        val summary = buildString {
+            append("Imported '${asset.title.take(28)}'")
+            if (asset.importedCaptions.isNotEmpty()) {
+                append(" + ${asset.importedCaptions.size} captions")
+            }
+        }
+        _feedback.tryEmit(summary)
+    }
+
     fun saveNow() {
         val state = _uiState.value
         if (state.projectId.isBlank()) return
@@ -2903,37 +2987,38 @@ class EditorViewModel(
         }
     }
 
-    fun runGeminiAutoCaptions(languageHint: String) {
-        pausePlayback()
+    private data class CaptionAudioTarget(
+        val uri: String,
+        val trimStartMs: Long,
+        val trimEndMs: Long,
+        val timelineStartMs: Long,
+        val label: String
+    )
+
+    private fun resolveCaptionAudioTarget(): CaptionAudioTarget? {
         val state = _uiState.value
-
-        // Resolve target clip with audio: selected audio -> selected video -> clip at playhead -> first audio/video clip
-        data class AudioSourceTarget(
-            val uri: String,
-            val trimStartMs: Long,
-            val trimEndMs: Long,
-            val timelineStartMs: Long,
-            val label: String
-        )
-
-        val target: AudioSourceTarget? = when (val sel = state.selection) {
+        return when (val sel = state.selection) {
             is SelectedItem.AudioItem -> state.timeline.audioClips.firstOrNull { it.id == sel.audioId }?.let {
-                AudioSourceTarget(it.uri, it.trimStartMs, it.trimEndMs, it.startTimeMs, it.displayName)
+                CaptionAudioTarget(it.uri, it.trimStartMs, it.trimEndMs, it.startTimeMs, it.displayName)
             }
             is SelectedItem.MainClipItem -> state.timeline.mainClipRanges()
                 .firstOrNull { it.clip.id == sel.clipId && it.clip.mediaType == MainMediaType.VIDEO }
-                ?.let { AudioSourceTarget(it.clip.uri, it.clip.trimStartMs, it.clip.trimEndMs, it.startMs, it.clip.displayName) }
+                ?.let { CaptionAudioTarget(it.clip.uri, it.clip.trimStartMs, it.clip.trimEndMs, it.startMs, it.clip.displayName) }
             else -> null
         } ?: state.timeline.mainClipAt(state.playheadMs)
             ?.takeIf { it.clip.mediaType == MainMediaType.VIDEO }
-            ?.let { AudioSourceTarget(it.clip.uri, it.clip.trimStartMs, it.clip.trimEndMs, it.startMs, it.clip.displayName) }
+            ?.let { CaptionAudioTarget(it.clip.uri, it.clip.trimStartMs, it.clip.trimEndMs, it.startMs, it.clip.displayName) }
             ?: state.timeline.audioClips.firstOrNull()?.let {
-                AudioSourceTarget(it.uri, it.trimStartMs, it.trimEndMs, it.startTimeMs, it.displayName)
+                CaptionAudioTarget(it.uri, it.trimStartMs, it.trimEndMs, it.startTimeMs, it.displayName)
             }
             ?: state.timeline.mainClipRanges().firstOrNull { it.clip.mediaType == MainMediaType.VIDEO }?.let {
-                AudioSourceTarget(it.clip.uri, it.clip.trimStartMs, it.clip.trimEndMs, it.startMs, it.clip.displayName)
+                CaptionAudioTarget(it.clip.uri, it.clip.trimStartMs, it.clip.trimEndMs, it.startMs, it.clip.displayName)
             }
+    }
 
+    fun runGeminiAutoCaptions(languageHint: String) {
+        pausePlayback()
+        val target = resolveCaptionAudioTarget()
         if (target == null) {
             _uiState.update {
                 it.copy(autoCaptionError = "Add a video or audio clip first to transcribe speech.")
@@ -2941,6 +3026,7 @@ class EditorViewModel(
             return
         }
 
+        val activeProvider = SecureCredentialStore.getInstance(appContext).aiState.value.activeProvider
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
@@ -2967,15 +3053,13 @@ class EditorViewModel(
                 }
 
                 _uiState.update {
-                    it.copy(autoCaptionStatus = "Transcribing speech with Gemini AI ($languageHint)…")
+                    it.copy(autoCaptionStatus = "Transcribing with ${activeProvider.shortBadge} ($languageHint)…")
                 }
 
-                val result = GeminiColoristService.transcribeAudioToCaptions(
+                val result = MultiProviderTranscriptionEngine.transcribe(
                     context = appContext,
-                    audioBytes = extracted.bytes,
-                    mimeType = extracted.mimeType,
+                    payload = extracted,
                     clipStartOnTimelineMs = target.timelineStartMs,
-                    clipDurationMs = extracted.durationMs,
                     languageHint = languageHint
                 )
 
@@ -2988,7 +3072,7 @@ class EditorViewModel(
                     _uiState.update {
                         it.copy(
                             autoCaptionLoading = false,
-                            autoCaptionStatus = "Added ${captions.size} synced captions",
+                            autoCaptionStatus = "Added ${captions.size} synced captions (${activeProvider.shortBadge})",
                             autoCaptionError = null
                         )
                     }
@@ -2998,7 +3082,7 @@ class EditorViewModel(
                         it.copy(
                             autoCaptionLoading = false,
                             autoCaptionStatus = null,
-                            autoCaptionError = err.localizedMessage ?: "Gemini transcription failed. Try again or use Offline Mic."
+                            autoCaptionError = err.localizedMessage ?: "Transcription failed. Try AI Login or Offline Models."
                         )
                     }
                 }
@@ -3010,6 +3094,73 @@ class EditorViewModel(
                         autoCaptionLoading = false,
                         autoCaptionStatus = null,
                         autoCaptionError = e.localizedMessage ?: "Auto caption transcription failed."
+                    )
+                }
+            }
+        }
+    }
+
+    fun runOfflineVideoAutoCaptions(languageHint: String) {
+        pausePlayback()
+        val target = resolveCaptionAudioTarget()
+        if (target == null) {
+            _uiState.update {
+                it.copy(autoCaptionError = "Add a video or audio clip first to transcribe offline.")
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    autoCaptionLoading = true,
+                    autoCaptionStatus = "Preparing offline speech model ($languageHint)…",
+                    autoCaptionError = null
+                )
+            }
+            try {
+                val manager = OfflineSpeechModelManager.getInstance(appContext)
+                val result = manager.transcribeClipOffline(
+                    uriString = target.uri,
+                    trimStartMs = target.trimStartMs,
+                    trimEndMs = target.trimEndMs,
+                    timelineOffsetMs = target.timelineStartMs,
+                    languageHint = languageHint,
+                    onStatus = { status ->
+                        _uiState.update { it.copy(autoCaptionStatus = status) }
+                    }
+                )
+                result.onSuccess { captions ->
+                    dispatchCommand(
+                        command = AddCaptionsCommand(captions, "Offline Auto Captions (${captions.size})"),
+                        newSelection = SelectedItem.CaptionItem(captions.first().id),
+                        newInspector = InspectorTab.CAPTIONS
+                    )
+                    _uiState.update {
+                        it.copy(
+                            autoCaptionLoading = false,
+                            autoCaptionStatus = "Added ${captions.size} offline captions ($languageHint)",
+                            autoCaptionError = null
+                        )
+                    }
+                    _feedback.tryEmit("Transcribed ${captions.size} captions offline!")
+                }.onFailure { err ->
+                    _uiState.update {
+                        it.copy(
+                            autoCaptionLoading = false,
+                            autoCaptionStatus = null,
+                            autoCaptionError = err.localizedMessage ?: "Offline transcription failed."
+                        )
+                    }
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        autoCaptionLoading = false,
+                        autoCaptionStatus = null,
+                        autoCaptionError = e.localizedMessage ?: "Offline transcription failed."
                     )
                 }
             }

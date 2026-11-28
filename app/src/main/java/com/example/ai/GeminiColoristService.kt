@@ -389,16 +389,16 @@ object GeminiColoristService {
         return try {
             val app = requireFirebaseApp(context)
             val langInstruction = if (languageHint.equals("Auto", ignoreCase = true) || languageHint.isBlank()) {
-                "Detect the spoken language automatically and transcribe naturally in that language."
+                "Detect the spoken language automatically and transcribe accurately in the speaker's language."
             } else {
-                "Transcribe the spoken audio in $languageHint."
+                "The spoken audio is in $languageHint. Transcribe accurately in $languageHint script (preserving natural spoken words and punctuation)."
             }
             val prompt = buildString {
-                append("Transcribe all spoken words from the attached audio accurately into short, punchy video subtitles. ")
+                append("Listen carefully to the attached audio track and transcribe every spoken phrase into timed video subtitles. ")
                 append("$langInstruction ")
-                append("Keep each segment concise (around 2 to ${maxWordsPerLine.coerceIn(3, 8)} words) with accurate startMs and endMs timestamps ")
-                append("within 0 to ${clipDurationMs.coerceAtLeast(1000L)} milliseconds. ")
-                append("If there is no speech, return an empty segments array.")
+                append("Keep each subtitle segment concise (2 to ${maxWordsPerLine.coerceIn(3, 8)} words) with accurate startMs and endMs timestamps ")
+                append("in milliseconds between 0 and ${clipDurationMs.coerceAtLeast(1000L)}. ")
+                append("Return valid JSON with a segments array. If there is no human speech, return {\"segments\": []}.")
             }
 
             val response = withTimeout(REQUEST_TIMEOUT_MS) {
@@ -409,37 +409,35 @@ object GeminiColoristService {
                 audioTranscriptionModel(app).generateContent(inputContent)
             }
 
-            val rawJson = response.text?.trim()
+            val rawJson = response.text?.let { CaptionSegmentNormalizer.stripJsonMarkdownFences(it) }
+                ?.takeIf { it.isNotEmpty() }
                 ?: return Result.failure(IllegalStateException("Gemini returned an empty transcription response."))
 
             val root = JSONObject(rawJson)
             val arr = root.optJSONArray("segments")
                 ?: return Result.failure(IllegalStateException("No speech segments found in audio."))
 
-            val clips = mutableListOf<CaptionClip>()
-            val baseOffset = clipStartOnTimelineMs.coerceAtLeast(0L)
+            val rawSegments = mutableListOf<RawCaptionSegment>()
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
                 val text = obj.optString("text", "").trim()
                 if (text.isEmpty()) continue
-                val relStart = obj.optLong("startMs", 0L).coerceIn(0L, clipDurationMs.coerceAtLeast(500L))
+                val relStart = obj.optLong("startMs", 0L)
                 val relEnd = obj.optLong("endMs", relStart + 1500L)
-                    .coerceAtLeast(relStart + 450L)
-                    .coerceAtMost(clipDurationMs.coerceAtLeast(relStart + 450L))
-                clips.add(
-                    CaptionClip(
-                        text = text,
-                        startTimeMs = baseOffset + relStart,
-                        endTimeMs = baseOffset + relEnd,
-                        animationPreset = CaptionAnimationPreset.ACTIVE_WORD_HIGHLIGHT
-                    )
-                )
+                rawSegments.add(RawCaptionSegment(relStart, relEnd, text))
             }
 
-            if (clips.isEmpty()) {
+            val normalized = CaptionSegmentNormalizer.normalize(
+                rawSegments = rawSegments,
+                timelineOffsetMs = clipStartOnTimelineMs,
+                clipDurationMs = clipDurationMs,
+                maxWordsPerLine = maxWordsPerLine
+            )
+
+            if (normalized.isEmpty()) {
                 Result.failure(IllegalStateException("No clear speech was detected in this audio clip."))
             } else {
-                Result.success(clips.sortedBy { it.startTimeMs })
+                Result.success(normalized)
             }
         } catch (te: TimeoutCancellationException) {
             Log.e(TAG, "Audio transcription timed out", te)
@@ -448,7 +446,16 @@ object GeminiColoristService {
             throw ce
         } catch (e: Exception) {
             Log.e(TAG, "Audio transcription failed", e)
-            Result.failure(e)
+            val raw = e.localizedMessage.orEmpty()
+            val friendly = when {
+                raw.contains("403", ignoreCase = true) ||
+                    raw.contains("app check", ignoreCase = true) ||
+                    raw.contains("attestation", ignoreCase = true) ||
+                    raw.contains("not initialized", ignoreCase = true) ->
+                    "Built-in Firebase Gemini is unavailable on this APK install. Tap 'AI Login' to connect your free Gemini / Groq Whisper key, or use 'Offline Models'."
+                else -> raw.ifBlank { "Gemini transcription failed. Tap 'AI Login' or 'Offline Models'." }
+            }
+            Result.failure(IllegalStateException(friendly, e))
         }
     }
 

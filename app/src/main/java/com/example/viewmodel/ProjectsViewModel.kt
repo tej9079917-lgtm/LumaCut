@@ -49,6 +49,60 @@ class ProjectsViewModel(
         }
     }
 
+    fun createProjectFromYouTubeAsset(
+        asset: com.example.media.YouTubeImportedAsset,
+        onCreated: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val summary = repository.createProject(
+                title = asset.title.take(36).ifBlank { "YouTube Import" },
+                aspectRatio = AspectRatio.LANDSCAPE_16_9
+            )
+            val clips = mutableListOf<com.example.model.MainClip>()
+            val downloaded = asset.downloadedVideoMeta
+            if (downloaded != null) {
+                clips.add(
+                    com.example.model.MainClip(
+                        mediaType = com.example.model.MainMediaType.VIDEO,
+                        displayName = asset.title.take(40),
+                        uri = downloaded.uriString,
+                        sourceDurationMs = downloaded.durationMs,
+                        trimStartMs = 0L,
+                        trimEndMs = downloaded.durationMs,
+                        thumbnailPath = downloaded.thumbnailPath
+                    )
+                )
+            } else if (!asset.thumbnailLocalUri.isNullOrBlank()) {
+                val dur = asset.importedCaptions.maxOfOrNull { it.endTimeMs }?.coerceIn(5_000L, 60_000L) ?: 6_000L
+                clips.add(
+                    com.example.model.MainClip(
+                        mediaType = com.example.model.MainMediaType.IMAGE,
+                        displayName = asset.title.take(40),
+                        uri = asset.thumbnailLocalUri,
+                        sourceDurationMs = dur,
+                        trimStartMs = 0L,
+                        trimEndMs = dur
+                    )
+                )
+            }
+            val timeline = com.example.model.TimelineDocument(
+                mainClips = clips,
+                captions = asset.importedCaptions
+            )
+            repository.saveProjectState(
+                id = summary.id,
+                title = summary.title,
+                aspectRatio = AspectRatio.LANDSCAPE_16_9,
+                timeline = timeline
+            )
+            onCreated(summary.id)
+        }
+    }
+
+    fun emitToast(message: String) {
+        _toastMessage.tryEmit(message)
+    }
+
     fun renameProject(id: String, newTitle: String) {
         viewModelScope.launch {
             repository.renameProject(id, newTitle)
