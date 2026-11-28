@@ -145,7 +145,13 @@ class FirebaseAuthManager private constructor(private val appContext: Context) {
         scope.launch {
             _authState.update { it.copy(isLoading = true, errorMessage = null, statusMessage = null) }
             try {
-                val webClientId = activity.getString(R.string.default_web_client_id)
+                val webClientId = activity.getString(R.string.default_web_client_id).trim()
+                if (webClientId.isBlank()) {
+                    val msg = "Google Sign-In is not configured in this APK (missing google-services.json). Use Offline AI or AI Login with an API key."
+                    _authState.update { it.copy(isLoading = false, errorMessage = msg) }
+                    onError?.invoke(msg)
+                    return@launch
+                }
                 val credentialManager = CredentialManager.create(activity)
                 val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = webClientId)
                     .build()

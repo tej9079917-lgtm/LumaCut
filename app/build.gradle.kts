@@ -105,19 +105,97 @@ abstract class CopyFirebaseFallbackAssetTask : DefaultTask() {
   }
 }
 
+// Generates a fallback default_web_client_id string resource ONLY when app/google-services.json
+// is absent (e.g. CI/GitHub Actions builds without the secret) or lacks a web OAuth client
+// (client_type == 3) for this applicationId. When google-services.json is present and valid,
+// no XML is written so the Google Services plugin's real default_web_client_id is never shadowed.
+abstract class GenerateFirebaseFallbackResTask : DefaultTask() {
+  @get:InputFile
+  @get:Optional
+  @get:PathSensitive(PathSensitivity.RELATIVE)
+  abstract val googleServicesFile: RegularFileProperty
+
+  @get:Input
+  abstract val targetPackageName: Property<String>
+
+  @get:Input
+  @get:Optional
+  abstract val fallbackWebClientId: Property<String>
+
+  @get:OutputDirectory
+  abstract val outputDir: DirectoryProperty
+
+  @TaskAction
+  fun generateFallbackRes() {
+    val outDir = outputDir.get().asFile
+    val valuesDir = File(outDir, "values")
+    val fallbackFile = File(valuesDir, "firebase_fallback_strings.xml")
+
+    val src = googleServicesFile.orNull?.asFile
+    val pkg = targetPackageName.get()
+    val hasGoogleServicesWebClient = src != null && src.exists() && run {
+      val content = src.readText()
+      val clientSections = content.split("\"client_info\"")
+      val matchingSection = clientSections.firstOrNull { it.contains("\"$pkg\"") }
+      matchingSection != null && Regex("\"client_type\"\\s*:\\s*3").containsMatchIn(matchingSection)
+    }
+
+    if (hasGoogleServicesWebClient) {
+      if (fallbackFile.exists()) fallbackFile.delete()
+    } else {
+      valuesDir.mkdirs()
+      val rawId = fallbackWebClientId.orNull?.trim().orEmpty()
+      val escapedId = rawId
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\"", "&quot;")
+        .replace("'", "\\'")
+      fallbackFile.writeText(
+        """
+        <?xml version="1.0" encoding="utf-8"?>
+        <resources>
+            <string name="default_web_client_id" translatable="false">$escapedId</string>
+        </resources>
+        """.trimIndent() + "\n"
+      )
+    }
+  }
+}
+
 androidComponents {
   onVariants { variant ->
     val gsFile = layout.projectDirectory.file("google-services.json")
-    val taskProvider = tasks.register<CopyFirebaseFallbackAssetTask>(
-      "copy${variant.name.replaceFirstChar { it.uppercase() }}FirebaseFallbackAsset"
+    val capName = variant.name.replaceFirstChar { it.uppercase() }
+
+    val assetTaskProvider = tasks.register<CopyFirebaseFallbackAssetTask>(
+      "copy${capName}FirebaseFallbackAsset"
     ) {
       if (gsFile.asFile.exists()) {
         googleServicesFile.set(gsFile)
       }
     }
     variant.sources.assets?.addGeneratedSourceDirectory(
-      taskProvider,
+      assetTaskProvider,
       CopyFirebaseFallbackAssetTask::outputDir
+    )
+
+    val resTaskProvider = tasks.register<GenerateFirebaseFallbackResTask>(
+      "generate${capName}FirebaseFallbackRes"
+    ) {
+      if (gsFile.asFile.exists()) {
+        googleServicesFile.set(gsFile)
+      }
+      targetPackageName.set(variant.applicationId)
+      fallbackWebClientId.set(
+        providers.environmentVariable("GOOGLE_WEB_CLIENT_ID")
+          .orElse(providers.gradleProperty("GOOGLE_WEB_CLIENT_ID"))
+          .orElse("")
+      )
+    }
+    variant.sources.res?.addGeneratedSourceDirectory(
+      resTaskProvider,
+      GenerateFirebaseFallbackResTask::outputDir
     )
   }
 }
