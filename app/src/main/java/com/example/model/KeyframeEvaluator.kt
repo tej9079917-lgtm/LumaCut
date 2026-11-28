@@ -89,6 +89,22 @@ object KeyframeEvaluator {
                     1f - (f * f * f) / 2f
                 }
             }
+            KeyframeEasing.SPRING -> {
+                // Smooth cinematic overshoot ease-out (back easing)
+                val c1 = 1.70158f
+                val c3 = c1 + 1f
+                val d = x - 1f
+                1f + c3 * d * d * d + c1 * d * d
+            }
+            KeyframeEasing.HOLD -> if (x >= 0.999f) 1f else 0f
+        }
+    }
+
+    fun sampleCurve(easing: KeyframeEasing, steps: Int = 40): List<Pair<Float, Float>> {
+        val count = steps.coerceIn(8, 120)
+        return (0..count).map { i ->
+            val x = i.toFloat() / count.toFloat()
+            x to applyEasing(x, easing)
         }
     }
 

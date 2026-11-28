@@ -6,6 +6,8 @@ import com.example.media.ExtractedAudioPayload
 import com.example.media.OfflineLanguageCatalog
 import com.example.model.CaptionClip
 import com.example.security.AiCaptionProvider
+import com.example.security.FirebaseAuthManager
+import com.example.security.FirebaseAuthRequiredException
 import com.example.security.SecureCredentialStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -20,7 +22,7 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Multi-engine Cloud AI Auto-Caption transcription router:
- * 1. LumaCut Built-in Gemini (Firebase AI Logic `gemini-3.8-flash`)
+ * 1. LumaCut Built-in Gemini (Firebase AI Logic `gemini-3.8-flash`, gated by Firebase Auth Google Sign-In)
  * 2. Personal Gemini Account (`gemini-3-flash-preview` via user-supplied Google AI Studio key)
  * 3. Groq AI (`whisper-large-v3-turbo` — fast 99+ language speech recognition)
  * 4. OpenAI (`whisper-1` — multilingual speech recognition)
@@ -50,6 +52,13 @@ object MultiProviderTranscriptionEngine {
         val provider = store.aiState.value.activeProvider
         return when (provider) {
             AiCaptionProvider.FIREBASE_BUILTIN -> {
+                if (!FirebaseAuthManager.isSignedIn()) {
+                    return Result.failure(
+                        FirebaseAuthRequiredException(
+                            "Sign in with Google in AI Login to unlock Cloud Gemini Auto Captions, or use Offline AI for 100% local captions."
+                        )
+                    )
+                }
                 GeminiColoristService.transcribeAudioToCaptions(
                     context = context,
                     audioBytes = payload.bytes,

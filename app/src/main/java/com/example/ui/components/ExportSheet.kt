@@ -52,11 +52,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.filled.HdrOn
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.VideoSettings
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import com.example.model.AspectRatio
 import com.example.model.ExportBitrateTier
 import com.example.model.ExportConfig
 import com.example.model.ExportResolution
 import com.example.model.ExportState
+import com.example.model.ExportVideoCodec
 import com.example.model.TimelineDocument
 import com.example.model.formatTimecode
 import com.example.ui.theme.ActiveRail
@@ -125,7 +131,7 @@ fun ExportBottomSheet(
 
             when (exportState) {
                 is ExportState.Idle -> {
-                    // Summary pills
+                    // Summary pills + 100% On-Device Zero Watermark verification strip
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -133,6 +139,29 @@ fun ExportBottomSheet(
                         SummaryBadge("${timeline.mainClips.size} Clips", Modifier.weight(1f))
                         SummaryBadge("${timeline.overlays.size} Overlays", Modifier.weight(1f))
                         SummaryBadge("${timeline.audioClips.size} Audio", Modifier.weight(1f))
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(TrackOverlayEmerald.copy(alpha = 0.12f))
+                            .border(1.dp, TrackOverlayEmerald.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.VerifiedUser,
+                            contentDescription = null,
+                            tint = TrackOverlayEmerald,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Text(
+                            text = "100% On-Device Render • No Watermarks • No Subscriptions",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TrackOverlayEmerald
+                        )
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -251,6 +280,106 @@ fun ExportBottomSheet(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
+                    // 2b. Video Codec Selector (H.264 / HEVC / AV1) & 10-bit HDR Depth
+                    SectionHeaderRow(
+                        icon = Icons.Default.VideoSettings,
+                        title = "Video Codec & Color Depth",
+                        trailing = "${config.codec.label} • ${if (config.tenBitColor) "10-bit HDR" else "8-bit SDR"}"
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        ExportVideoCodec.entries.forEach { codec ->
+                            val picked = config.codec == codec
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .defaultMinSize(minHeight = 54.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (picked) AmberContainer else ActiveRail)
+                                    .border(
+                                        width = if (picked) 2.dp else 1.dp,
+                                        color = if (picked) CinemaAmber else BorderHairline,
+                                        shape = RoundedCornerShape(10.dp)
+                                    )
+                                    .clickable { onUpdateConfig(config.copy(codec = codec)) }
+                                    .padding(vertical = 8.dp, horizontal = 8.dp)
+                                    .testTag("export_codec_${codec.name.lowercase()}"),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Text(
+                                    text = codec.label,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = if (picked) CinemaAmber else ChalkWhite
+                                )
+                                Text(
+                                    text = codec.badge,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = SilverMuted,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(ActiveRail)
+                            .border(
+                                width = 1.dp,
+                                color = if (config.tenBitColor) CinemaAmber else BorderHairline,
+                                shape = RoundedCornerShape(10.dp)
+                            )
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.HdrOn,
+                                contentDescription = "10-bit HDR color",
+                                tint = if (config.tenBitColor) CinemaAmber else SilverMuted,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "10-bit HDR Color Pipeline",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = ChalkWhite
+                                )
+                                Text(
+                                    text = "Preserve wide-gamut HDR when supported by hardware",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = SilverMuted
+                                )
+                            }
+                        }
+                        Switch(
+                            checked = config.tenBitColor,
+                            onCheckedChange = { enabled ->
+                                onUpdateConfig(config.copy(tenBitColor = enabled))
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = OnAmber,
+                                checkedTrackColor = CinemaAmber
+                            ),
+                            modifier = Modifier.testTag("export_ten_bit_switch")
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
                     // 3. Bitrate Selector (Presets + Continuous Mbps Slider)
                     SectionHeaderRow(
                         icon = Icons.Default.Tune,
@@ -351,7 +480,7 @@ fun ExportBottomSheet(
                                     color = SilverMuted
                                 )
                                 Text(
-                                    text = "${config.resolution.label} • ${config.fps}fps • H.264 ${config.bitrateMbps} Mbps",
+                                    text = "${config.resolution.label} • ${config.fps}fps • ${config.codec.label} ${if (config.tenBitColor) "10-bit" else "8-bit"} • ${config.bitrateMbps} Mbps",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = SlateDim
                                 )

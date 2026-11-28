@@ -1,5 +1,8 @@
 package com.example.ui.components
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
@@ -71,11 +74,14 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Login
 import com.example.ai.MultiProviderTranscriptionEngine
 import com.example.media.OfflineLanguagePackState
 import com.example.media.OfflinePackStatus
 import com.example.media.OfflineSpeechModelManager
 import com.example.security.AiCaptionProvider
+import com.example.security.FirebaseAuthManager
 import com.example.security.SecureCredentialStore
 import com.example.ui.theme.ActiveRail
 import com.example.ui.theme.AmberContainer
@@ -104,8 +110,10 @@ fun AiCaptionSetupBottomSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val credentialStore = remember(context) { SecureCredentialStore.getInstance(context) }
     val offlineManager = remember(context) { OfflineSpeechModelManager.getInstance(context) }
+    val authManager = remember(context) { FirebaseAuthManager.getInstance(context) }
 
     val aiCredState by credentialStore.aiState.collectAsStateWithLifecycle()
+    val authState by authManager.authState.collectAsStateWithLifecycle()
     val offlinePacks by offlineManager.packs.collectAsStateWithLifecycle()
     val offlineStatusMsg by offlineManager.statusMessage.collectAsStateWithLifecycle()
     val isOfflineCapable by offlineManager.isOnDeviceSupported.collectAsStateWithLifecycle()
@@ -204,8 +212,108 @@ fun AiCaptionSetupBottomSheet(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    // Firebase Auth Google Sign-In Gate for Cloud Built-in Gemini AI
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(ObsidianBg)
+                            .border(
+                                width = 1.dp,
+                                color = if (authState.isSignedIn) TrackOverlayEmerald.copy(alpha = 0.6f) else CinemaAmber.copy(alpha = 0.7f),
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .padding(12.dp)
+                            .testTag("firebase_google_auth_card"),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AccountCircle,
+                                contentDescription = "Google Account",
+                                tint = if (authState.isSignedIn) TrackOverlayEmerald else CinemaAmber,
+                                modifier = Modifier.size(26.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (authState.isSignedIn) {
+                                        authState.displayName ?: "Google Account Connected"
+                                    } else {
+                                        "Firebase Cloud AI Sign-In"
+                                    },
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = ChalkWhite
+                                )
+                                Text(
+                                    text = if (authState.isSignedIn) {
+                                        authState.email ?: "Cloud Gemini Auto-Captions unlocked"
+                                    } else {
+                                        "Required only for Cloud Gemini Auto-Captions. Offline AI stays 100% account-free."
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = SilverMuted
+                                )
+                            }
+                        }
+
+                        if (authState.isSignedIn) {
+                            OutlinedButton(
+                                enabled = !authState.isLoading,
+                                onClick = { authManager.signOut(context, scope) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(44.dp)
+                                    .testTag("firebase_google_signout_button")
+                            ) {
+                                Icon(Icons.Default.Logout, contentDescription = null, tint = ErrorCrimson, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Sign Out of Google", color = ErrorCrimson, style = MaterialTheme.typography.labelLarge)
+                            }
+                        } else {
+                            Button(
+                                enabled = !authState.isLoading,
+                                onClick = {
+                                    val hostActivity = context.findAuthActivity()
+                                    if (hostActivity != null) {
+                                        authManager.signInWithGoogle(hostActivity, scope)
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = CinemaAmber, contentColor = OnAmber),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("firebase_google_signin_button")
+                            ) {
+                                if (authState.isLoading) {
+                                    CircularProgressIndicator(
+                                        color = OnAmber,
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Signing in…", style = MaterialTheme.typography.labelLarge)
+                                } else {
+                                    Icon(Icons.Default.Login, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Sign in with Google", style = MaterialTheme.typography.labelLarge)
+                                }
+                            }
+                        }
+
+                        authState.statusMessage?.let { msg ->
+                            Text(msg, style = MaterialTheme.typography.labelSmall, color = TrackOverlayEmerald)
+                        }
+                        authState.errorMessage?.let { err ->
+                            Text(err, style = MaterialTheme.typography.labelSmall, color = ErrorCrimson)
+                        }
+                    }
+
                     Text(
-                        text = "Connect your own free Gemini, Groq Whisper, or OpenAI account so Auto Captions works reliably on every phone in 99+ languages (Telugu, Hindi, Tamil, English, etc.). Credentials are encrypted on-device with Android Keystore.",
+                        text = "Or connect a personal Gemini, Groq Whisper, or OpenAI key encrypted on-device with Android Keystore.",
                         style = MaterialTheme.typography.bodySmall,
                         color = SilverMuted
                     )
@@ -569,4 +677,10 @@ private fun OfflineLanguagePackRow(
             )
         }
     }
+}
+
+private tailrec fun Context.findAuthActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findAuthActivity()
+    else -> null
 }

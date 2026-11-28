@@ -1,9 +1,14 @@
 package com.example.ui.components
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -300,44 +305,31 @@ fun KeyframeInspector(
                 }
             }
 
-            // 3. Easing Curve Selector (visible when clip has keyframes)
+            // 3. Interactive Motion Curve Editor & Easing Selector (visible when clip has keyframes)
             if (sortedKeyframes.isNotEmpty()) {
                 val activeEasing = activeKeyframe?.easing
                     ?: sortedKeyframes.lastOrNull { it.timeOffsetMs <= localMs }?.easing
                     ?: KeyframeEasing.EASE_IN_OUT
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 14.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Curve", style = MaterialTheme.typography.labelSmall, color = SilverMuted)
-                    KeyframeEasing.entries.forEach { easing ->
-                        val picked = activeEasing == easing
-                        Box(
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(if (picked) AmberContainer else ActiveRail)
-                                .border(
-                                    1.dp,
-                                    if (picked) CinemaAmber else BorderHairline,
-                                    CircleShape
-                                )
-                                .clickable { onUpdateActiveEasing(easing) }
-                                .padding(horizontal = 9.dp, vertical = 4.dp)
-                                .testTag("kf_easing_${easing.name.lowercase()}")
-                        ) {
-                            Text(
-                                text = easing.displayName,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (picked) CinemaAmber else SilverMuted
-                            )
+                val segProgress = remember(sortedKeyframes, localMs) {
+                    if (sortedKeyframes.size < 2) {
+                        0.5f
+                    } else {
+                        val idx = sortedKeyframes.indexOfLast { it.timeOffsetMs <= localMs }.coerceIn(0, sortedKeyframes.lastIndex)
+                        if (idx >= sortedKeyframes.lastIndex) 1f
+                        else {
+                            val k0 = sortedKeyframes[idx]
+                            val k1 = sortedKeyframes[idx + 1]
+                            val span = (k1.timeOffsetMs - k0.timeOffsetMs).coerceAtLeast(1L)
+                            ((localMs - k0.timeOffsetMs).toFloat() / span.toFloat()).coerceIn(0f, 1f)
                         }
                     }
                 }
+                Spacer(modifier = Modifier.height(8.dp))
+                MotionCurveEditorCard(
+                    easing = activeEasing,
+                    segmentProgress = segProgress,
+                    onSelectEasing = onUpdateActiveEasing
+                )
             }
 
             Spacer(modifier = Modifier.height(6.dp))
@@ -461,5 +453,136 @@ private fun KeyframeSliderRow(
             color = if (isModified) CinemaAmber else ChalkWhite,
             modifier = Modifier.width(48.dp)
         )
+    }
+}
+
+@Composable
+private fun MotionCurveEditorCard(
+    easing: KeyframeEasing,
+    segmentProgress: Float,
+    onSelectEasing: (KeyframeEasing) -> Unit
+) {
+    val curveSamples = remember(easing) { KeyframeEvaluator.sampleCurve(easing, steps = 44) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(ObsidianBg)
+            .border(1.dp, BorderHairline, RoundedCornerShape(10.dp))
+            .padding(10.dp)
+            .testTag("kf_curve_editor_card"),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "Curve Editor • ${easing.displayName}",
+                style = MaterialTheme.typography.labelMedium,
+                color = CinemaAmber
+            )
+            Text(
+                text = "Velocity Graph",
+                style = MaterialTheme.typography.labelSmall,
+                color = SilverMuted
+            )
+        }
+
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(74.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(InspectorCharcoal)
+                .testTag("kf_curve_canvas")
+        ) {
+            val padX = 14f
+            val padY = 12f
+            val plotW = (size.width - padX * 2f).coerceAtLeast(1f)
+            val plotH = (size.height - padY * 2f).coerceAtLeast(1f)
+
+            // Subtle reference grid
+            for (i in 0..4) {
+                val gx = padX + plotW * (i / 4f)
+                val gy = padY + plotH * (i / 4f)
+                drawLine(
+                    color = BorderHairline.copy(alpha = 0.55f),
+                    start = Offset(gx, padY),
+                    end = Offset(gx, padY + plotH),
+                    strokeWidth = 1f
+                )
+                drawLine(
+                    color = BorderHairline.copy(alpha = 0.55f),
+                    start = Offset(padX, gy),
+                    end = Offset(padX + plotW, gy),
+                    strokeWidth = 1f
+                )
+            }
+
+            // Linear reference diagonal
+            drawLine(
+                color = SlateDim.copy(alpha = 0.45f),
+                start = Offset(padX, padY + plotH),
+                end = Offset(padX + plotW, padY),
+                strokeWidth = 1.5f
+            )
+
+            // Plotted easing curve
+            val path = Path()
+            curveSamples.forEachIndexed { idx, (tx, ty) ->
+                val clampedY = ty.coerceIn(-0.15f, 1.15f)
+                val px = padX + tx * plotW
+                val py = padY + plotH - clampedY * plotH
+                if (idx == 0) path.moveTo(px, py) else path.lineTo(px, py)
+            }
+            drawPath(
+                path = path,
+                color = CinemaAmber,
+                style = Stroke(width = 3.5f, cap = StrokeCap.Round)
+            )
+
+            // Live playhead dot along the active keyframe curve segment
+            val liveY = KeyframeEvaluator.applyEasing(segmentProgress, easing).coerceIn(-0.15f, 1.15f)
+            val dotCenter = Offset(
+                x = padX + segmentProgress.coerceIn(0f, 1f) * plotW,
+                y = padY + plotH - liveY * plotH
+            )
+            drawCircle(color = ChalkWhite, radius = 6.5f, center = dotCenter)
+            drawCircle(color = CinemaAmber, radius = 4f, center = dotCenter)
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            KeyframeEasing.entries.forEach { preset ->
+                val picked = easing == preset
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(if (picked) AmberContainer else ActiveRail)
+                        .border(
+                            1.dp,
+                            if (picked) CinemaAmber else BorderHairline,
+                            CircleShape
+                        )
+                        .clickable { onSelectEasing(preset) }
+                        .padding(horizontal = 9.dp, vertical = 4.dp)
+                        .testTag("kf_easing_${preset.name.lowercase()}")
+                ) {
+                    Text(
+                        text = preset.displayName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (picked) CinemaAmber else SilverMuted
+                    )
+                }
+            }
+        }
     }
 }

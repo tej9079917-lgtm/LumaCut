@@ -123,16 +123,25 @@ import com.example.model.MaskSettings
 import com.example.model.OverlayType
 import com.example.model.TransitionSpec
 import com.example.model.formatTimecode
+import androidx.compose.material.icons.filled.DashboardCustomize
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.QueuePlayNext
+import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.runtime.rememberCoroutineScope
+import com.example.automation.LocalMcpJsonRpcServer
 import com.example.data.RenderJobStatus
 import com.example.media.RenderQueueManager
+import com.example.security.AiCaptionProvider
+import com.example.security.FirebaseAuthManager
 import com.example.security.SecureCredentialStore
 import com.example.ui.components.AiCaptionSetupBottomSheet
 import com.example.ui.components.AiCreativeStudioInspector
 import com.example.ui.components.AudioMixerInspector
+import com.example.ui.components.AutomationConsoleBottomSheet
 import com.example.ui.components.CanvasAspectInspector
 import com.example.ui.components.CaptionStudioInspector
+import com.example.ui.components.LocalTtsStudioBottomSheet
 import com.example.ui.components.ClipSeamInfo
 import com.example.ui.components.ColorAdjustInspector
 import com.example.ui.components.CutoutInspector
@@ -177,6 +186,18 @@ import com.example.viewmodel.EditorViewModel
 import com.example.viewmodel.InspectorTab
 import com.example.viewmodel.SelectedItem
 
+private enum class WorkspaceLayoutMode(val label: String) {
+    BALANCED("Balanced"),
+    MONITOR_FOCUS("Monitor Focus"),
+    TIMELINE_FOCUS("Timeline Focus"),
+    TIMELINE_TOP("Timeline Top");
+
+    fun next(): WorkspaceLayoutMode {
+        val list = entries
+        return list[(ordinal + 1) % list.size]
+    }
+}
+
 private tailrec fun Context.findHostActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findHostActivity()
@@ -189,22 +210,40 @@ fun EditorScreen(
     onNavigateBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val fonts by viewModel.availableFonts.collectAsStateWithLifecycle()
     val renderQueueManager = remember(context) { RenderQueueManager.getInstance(context) }
     val renderJobs by renderQueueManager.jobs.collectAsStateWithLifecycle()
     val credentialStore = remember(context) { SecureCredentialStore.getInstance(context) }
     val aiCredState by credentialStore.aiState.collectAsStateWithLifecycle()
+    val authManager = remember(context) { FirebaseAuthManager.getInstance(context) }
+    val authState by authManager.authState.collectAsStateWithLifecycle()
+    val mcpServer = remember { LocalMcpJsonRpcServer.getSharedInstance() }
+    val mcpStatus by mcpServer.status.collectAsStateWithLifecycle()
     val activeQueueCount = renderJobs.count {
         it.status == RenderJobStatus.RENDERING || it.status == RenderJobStatus.QUEUED
     }
+    var workspaceLayout by remember { mutableStateOf(WorkspaceLayoutMode.BALANCED) }
     var aiSetupSheetTab by remember { mutableStateOf<Int?>(null) }
     var showRenderQueueSheet by remember { mutableStateOf(false) }
+    var showLocalTtsSheet by remember { mutableStateOf(false) }
+    var showAutomationConsole by remember { mutableStateOf(false) }
     var youtubeSheetTab by remember { mutableStateOf<Int?>(null) }
     var youtubeUploadUri by remember { mutableStateOf<String?>(null) }
     var youtubeUploadTitle by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
     var showRenameDialog by remember { mutableStateOf(false) }
+
+    val requiresGoogleSignInForCloud =
+        aiCredState.activeProvider == AiCaptionProvider.FIREBASE_BUILTIN && !authState.isSignedIn
+
+    DisposableEffect(viewModel) {
+        mcpServer.attachBridge(viewModel.automationBridge)
+        onDispose {
+            mcpServer.detachBridge(viewModel.automationBridge)
+        }
+    }
 
     // Play-Policy Compliant Zero-Permission Pickers
     val pickMainVideos = rememberLauncherForActivityResult(
@@ -466,6 +505,13 @@ fun EditorScreen(
                             onToggleVoiceover = onToggleVoiceover,
                             onToggleOfflineMic = onToggleOfflineMic,
                             activeAiProviderBadge = aiCredState.activeProvider.shortBadge,
+                            requiresGoogleSignInForCloud = requiresGoogleSignInForCloud,
+                            onGoogleSignIn = {
+                                val act = context.findHostActivity()
+                                if (act != null) authManager.signInWithGoogle(act, scope)
+                                else aiSetupSheetTab = 0
+                            },
+                            onOpenLocalTtsStudio = { showLocalTtsSheet = true },
                             onOpenAiLoginSetup = { aiSetupSheetTab = 0 },
                             onOpenOfflineModelsSetup = { aiSetupSheetTab = 1 }
                         )
@@ -526,51 +572,92 @@ fun EditorScreen(
                             youtubeUploadTitle = state.projectTitle
                             youtubeSheetTab = 0
                         },
+                        workspaceLayoutLabel = workspaceLayout.label,
+                        onCycleWorkspaceLayout = { workspaceLayout = workspaceLayout.next() },
+                        isMcpRunning = mcpStatus.isRunning,
+                        onOpenAutomationConsole = { showAutomationConsole = true },
                         onUndo = { viewModel.undo() },
                         onRedo = { viewModel.redo() },
                         onOpenHistory = { viewModel.openHistorySheet() },
                         onExport = { viewModel.openExportSheet() }
                     )
 
-                    // 2. Vertical Portrait Editor Stage + Timeline + Slide-Up Inspector
+                    // 2. Customizable Vertical Workspace (Swappable & Resizable Monitor / Multi-Track Timeline)
+                    val monitorWeight = when (workspaceLayout) {
+                        WorkspaceLayoutMode.BALANCED -> if (state.activeInspector == InspectorTab.NONE) 0.48f else 0.36f
+                        WorkspaceLayoutMode.MONITOR_FOCUS -> if (state.activeInspector == InspectorTab.NONE) 0.62f else 0.44f
+                        WorkspaceLayoutMode.TIMELINE_FOCUS -> if (state.activeInspector == InspectorTab.NONE) 0.32f else 0.26f
+                        WorkspaceLayoutMode.TIMELINE_TOP -> if (state.activeInspector == InspectorTab.NONE) 0.46f else 0.34f
+                    }
+                    val timelineWeight = when (workspaceLayout) {
+                        WorkspaceLayoutMode.BALANCED -> if (state.activeInspector == InspectorTab.NONE) 0.52f else 0.34f
+                        WorkspaceLayoutMode.MONITOR_FOCUS -> if (state.activeInspector == InspectorTab.NONE) 0.38f else 0.28f
+                        WorkspaceLayoutMode.TIMELINE_FOCUS -> if (state.activeInspector == InspectorTab.NONE) 0.68f else 0.46f
+                        WorkspaceLayoutMode.TIMELINE_TOP -> if (state.activeInspector == InspectorTab.NONE) 0.54f else 0.36f
+                    }
+
                     Column(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        PreviewStage(
-                            aspectRatio = state.aspectRatio,
-                            timeline = state.timeline,
-                            playheadMs = state.playheadMs,
-                            isPlaying = state.isPlaying,
-                            seekNonce = state.seekNonce,
-                            selection = state.selection,
-                            availableFonts = fonts,
-                            snapGuideX = state.snapGuideX,
-                            snapGuideY = state.snapGuideY,
-                            textMotionReplayNonce = state.textMotionReplayNonce,
-                            showScopes = state.showVideoScopes,
-                            scopeMode = state.scopeMode,
-                            onToggleScopeMode = { viewModel.setScopeMode(it) },
-                            isSamplingChromaColor = state.isSamplingChromaColor,
-                            showCropGuide = state.activeInspector == InspectorTab.TRANSFORM_CROP,
-                            onSampledChromaColor = { viewModel.applySampledChromaColor(it) },
-                            onSelectOverlay = { viewModel.selectItem(SelectedItem.OverlayItem(it)) },
-                            onSelectCaption = { viewModel.selectItem(SelectedItem.CaptionItem(it), InspectorTab.CAPTIONS) },
-                            onSelectFx = { viewModel.selectFxLayer(it) },
-                            onUpdateFxRegion = { id, cx, cy, w, h -> viewModel.updateFxRegionLive(id, cx, cy, w, h) },
-                            onClearSelection = { viewModel.selectItem(SelectedItem.None) },
-                            onBeginOverlayGesture = { viewModel.beginOverlayGesture() },
-                            onTransformOverlay = { id, dx, dy, s, r -> viewModel.transformOverlayLive(id, dx, dy, s, r) },
-                            onEndOverlayGesture = { viewModel.endOverlayGesture() },
-                            onDeleteOverlay = {
-                                viewModel.selectItem(SelectedItem.OverlayItem(it))
-                                viewModel.deleteSelected()
-                            },
-                            onQuickImportVideo = {
-                                pickMainVideos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
-                            },
-                            onQuickImportPhoto = {
-                                pickMainPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                            },
-                            modifier = Modifier.weight(if (state.activeInspector == InspectorTab.NONE) 0.48f else 0.36f)
-                        )
+                        if (workspaceLayout == WorkspaceLayoutMode.TIMELINE_TOP) {
+                            MultilayerTimeline(
+                                timeline = state.timeline,
+                                playheadMs = state.playheadMs,
+                                isPlaying = state.isPlaying,
+                                zoom = state.timelineZoom,
+                                selection = state.selection,
+                                onSeek = { viewModel.scrubTo(it) },
+                                onPauseForScrub = { viewModel.pausePlayback() },
+                                onSelectMainClip = { viewModel.selectItem(SelectedItem.MainClipItem(it)) },
+                                onSelectOverlay = { viewModel.selectItem(SelectedItem.OverlayItem(it)) },
+                                onSelectAudio = { viewModel.selectItem(SelectedItem.AudioItem(it)) },
+                                onSelectTransition = { viewModel.selectItem(SelectedItem.TransitionItem(it), InspectorTab.TRANSITION) },
+                                onSelectCaption = { viewModel.selectItem(SelectedItem.CaptionItem(it), InspectorTab.CAPTIONS) },
+                                onSelectFx = { viewModel.selectFxLayer(it) },
+                                onTrimMainClip = { id, ds, de -> viewModel.trimMainClip(id, ds, de) },
+                                onTrimOverlay = { id, s, d -> viewModel.trimOverlayTiming(id, s, d) },
+                                onTrimAudio = { id, dt, ts, te -> viewModel.trimAudioClip(id, dt, ts, te) },
+                                onMoveCaption = { id, s, e -> viewModel.moveOrTrimCaption(id, s, e) },
+                                onMoveFx = { id, s, d -> viewModel.moveOrTrimFxLayer(id, s, d) },
+                                modifier = Modifier.weight(timelineWeight)
+                            )
+                        } else {
+                            PreviewStage(
+                                aspectRatio = state.aspectRatio,
+                                timeline = state.timeline,
+                                playheadMs = state.playheadMs,
+                                isPlaying = state.isPlaying,
+                                seekNonce = state.seekNonce,
+                                selection = state.selection,
+                                availableFonts = fonts,
+                                snapGuideX = state.snapGuideX,
+                                snapGuideY = state.snapGuideY,
+                                textMotionReplayNonce = state.textMotionReplayNonce,
+                                showScopes = state.showVideoScopes,
+                                scopeMode = state.scopeMode,
+                                onToggleScopeMode = { viewModel.setScopeMode(it) },
+                                isSamplingChromaColor = state.isSamplingChromaColor,
+                                showCropGuide = state.activeInspector == InspectorTab.TRANSFORM_CROP,
+                                onSampledChromaColor = { viewModel.applySampledChromaColor(it) },
+                                onSelectOverlay = { viewModel.selectItem(SelectedItem.OverlayItem(it)) },
+                                onSelectCaption = { viewModel.selectItem(SelectedItem.CaptionItem(it), InspectorTab.CAPTIONS) },
+                                onSelectFx = { viewModel.selectFxLayer(it) },
+                                onUpdateFxRegion = { id, cx, cy, w, h -> viewModel.updateFxRegionLive(id, cx, cy, w, h) },
+                                onClearSelection = { viewModel.selectItem(SelectedItem.None) },
+                                onBeginOverlayGesture = { viewModel.beginOverlayGesture() },
+                                onTransformOverlay = { id, dx, dy, s, r -> viewModel.transformOverlayLive(id, dx, dy, s, r) },
+                                onEndOverlayGesture = { viewModel.endOverlayGesture() },
+                                onDeleteOverlay = {
+                                    viewModel.selectItem(SelectedItem.OverlayItem(it))
+                                    viewModel.deleteSelected()
+                                },
+                                onQuickImportVideo = {
+                                    pickMainVideos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                                },
+                                onQuickImportPhoto = {
+                                    pickMainPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                },
+                                modifier = Modifier.weight(monitorWeight)
+                            )
+                        }
 
                         TransportControlBar(
                             playheadMs = state.playheadMs,
@@ -589,27 +676,67 @@ fun EditorScreen(
                             onZoomChange = { viewModel.setTimelineZoom(it) }
                         )
 
-                        MultilayerTimeline(
-                            timeline = state.timeline,
-                            playheadMs = state.playheadMs,
-                            isPlaying = state.isPlaying,
-                            zoom = state.timelineZoom,
-                            selection = state.selection,
-                            onSeek = { viewModel.scrubTo(it) },
-                            onPauseForScrub = { viewModel.pausePlayback() },
-                            onSelectMainClip = { viewModel.selectItem(SelectedItem.MainClipItem(it)) },
-                            onSelectOverlay = { viewModel.selectItem(SelectedItem.OverlayItem(it)) },
-                            onSelectAudio = { viewModel.selectItem(SelectedItem.AudioItem(it)) },
-                            onSelectTransition = { viewModel.selectItem(SelectedItem.TransitionItem(it), InspectorTab.TRANSITION) },
-                            onSelectCaption = { viewModel.selectItem(SelectedItem.CaptionItem(it), InspectorTab.CAPTIONS) },
-                            onSelectFx = { viewModel.selectFxLayer(it) },
-                            onTrimMainClip = { id, ds, de -> viewModel.trimMainClip(id, ds, de) },
-                            onTrimOverlay = { id, s, d -> viewModel.trimOverlayTiming(id, s, d) },
-                            onTrimAudio = { id, dt, ts, te -> viewModel.trimAudioClip(id, dt, ts, te) },
-                            onMoveCaption = { id, s, e -> viewModel.moveOrTrimCaption(id, s, e) },
-                            onMoveFx = { id, s, d -> viewModel.moveOrTrimFxLayer(id, s, d) },
-                            modifier = Modifier.weight(if (state.activeInspector == InspectorTab.NONE) 0.52f else 0.34f)
-                        )
+                        if (workspaceLayout == WorkspaceLayoutMode.TIMELINE_TOP) {
+                            PreviewStage(
+                                aspectRatio = state.aspectRatio,
+                                timeline = state.timeline,
+                                playheadMs = state.playheadMs,
+                                isPlaying = state.isPlaying,
+                                seekNonce = state.seekNonce,
+                                selection = state.selection,
+                                availableFonts = fonts,
+                                snapGuideX = state.snapGuideX,
+                                snapGuideY = state.snapGuideY,
+                                textMotionReplayNonce = state.textMotionReplayNonce,
+                                showScopes = state.showVideoScopes,
+                                scopeMode = state.scopeMode,
+                                onToggleScopeMode = { viewModel.setScopeMode(it) },
+                                isSamplingChromaColor = state.isSamplingChromaColor,
+                                showCropGuide = state.activeInspector == InspectorTab.TRANSFORM_CROP,
+                                onSampledChromaColor = { viewModel.applySampledChromaColor(it) },
+                                onSelectOverlay = { viewModel.selectItem(SelectedItem.OverlayItem(it)) },
+                                onSelectCaption = { viewModel.selectItem(SelectedItem.CaptionItem(it), InspectorTab.CAPTIONS) },
+                                onSelectFx = { viewModel.selectFxLayer(it) },
+                                onUpdateFxRegion = { id, cx, cy, w, h -> viewModel.updateFxRegionLive(id, cx, cy, w, h) },
+                                onClearSelection = { viewModel.selectItem(SelectedItem.None) },
+                                onBeginOverlayGesture = { viewModel.beginOverlayGesture() },
+                                onTransformOverlay = { id, dx, dy, s, r -> viewModel.transformOverlayLive(id, dx, dy, s, r) },
+                                onEndOverlayGesture = { viewModel.endOverlayGesture() },
+                                onDeleteOverlay = {
+                                    viewModel.selectItem(SelectedItem.OverlayItem(it))
+                                    viewModel.deleteSelected()
+                                },
+                                onQuickImportVideo = {
+                                    pickMainVideos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                                },
+                                onQuickImportPhoto = {
+                                    pickMainPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                },
+                                modifier = Modifier.weight(monitorWeight)
+                            )
+                        } else {
+                            MultilayerTimeline(
+                                timeline = state.timeline,
+                                playheadMs = state.playheadMs,
+                                isPlaying = state.isPlaying,
+                                zoom = state.timelineZoom,
+                                selection = state.selection,
+                                onSeek = { viewModel.scrubTo(it) },
+                                onPauseForScrub = { viewModel.pausePlayback() },
+                                onSelectMainClip = { viewModel.selectItem(SelectedItem.MainClipItem(it)) },
+                                onSelectOverlay = { viewModel.selectItem(SelectedItem.OverlayItem(it)) },
+                                onSelectAudio = { viewModel.selectItem(SelectedItem.AudioItem(it)) },
+                                onSelectTransition = { viewModel.selectItem(SelectedItem.TransitionItem(it), InspectorTab.TRANSITION) },
+                                onSelectCaption = { viewModel.selectItem(SelectedItem.CaptionItem(it), InspectorTab.CAPTIONS) },
+                                onSelectFx = { viewModel.selectFxLayer(it) },
+                                onTrimMainClip = { id, ds, de -> viewModel.trimMainClip(id, ds, de) },
+                                onTrimOverlay = { id, s, d -> viewModel.trimOverlayTiming(id, s, d) },
+                                onTrimAudio = { id, dt, ts, te -> viewModel.trimAudioClip(id, dt, ts, te) },
+                                onMoveCaption = { id, s, e -> viewModel.moveOrTrimCaption(id, s, e) },
+                                onMoveFx = { id, s, d -> viewModel.moveOrTrimFxLayer(id, s, d) },
+                                modifier = Modifier.weight(timelineWeight)
+                            )
+                        }
 
                         AnimatedVisibility(
                             visible = state.activeInspector != InspectorTab.NONE,
@@ -631,6 +758,13 @@ fun EditorScreen(
                                     onToggleVoiceover = onToggleVoiceover,
                                     onToggleOfflineMic = onToggleOfflineMic,
                                     activeAiProviderBadge = aiCredState.activeProvider.shortBadge,
+                                    requiresGoogleSignInForCloud = requiresGoogleSignInForCloud,
+                                    onGoogleSignIn = {
+                                        val act = context.findHostActivity()
+                                        if (act != null) authManager.signInWithGoogle(act, scope)
+                                        else aiSetupSheetTab = 0
+                                    },
+                                    onOpenLocalTtsStudio = { showLocalTtsSheet = true },
                                     onOpenAiLoginSetup = { aiSetupSheetTab = 0 },
                                     onOpenOfflineModelsSetup = { aiSetupSheetTab = 1 }
                                 )
@@ -665,6 +799,8 @@ fun EditorScreen(
                         onDelete = { viewModel.deleteSelected() },
                         onReorderMainClip = { id, left -> viewModel.reorderMainClip(id, left) },
                         onReorderOverlay = { id, up -> viewModel.reorderOverlayZ(id, up) },
+                        onOpenLocalTts = { showLocalTtsSheet = true },
+                        onOpenAutomationConsole = { showAutomationConsole = true },
                         onClearSelection = { viewModel.selectItem(SelectedItem.None, InspectorTab.NONE) }
                     )
                 }
@@ -741,6 +877,36 @@ fun EditorScreen(
         )
     }
 
+    if (showLocalTtsSheet) {
+        val captionsScript = remember(state.timeline.captions) {
+            state.timeline.captions.sortedBy { it.startTimeMs }.joinToString(". ") { it.text.trim() }
+        }
+        LocalTtsStudioBottomSheet(
+            initialScript = captionsScript,
+            captionsScript = captionsScript,
+            isSynthesizing = state.localTtsSynthesizing,
+            errorMessage = state.localTtsError,
+            onSynthesizeToTimeline = { script, lang, profile, pitch, speed ->
+                viewModel.synthesizeLocalTtsToTimeline(
+                    script = script,
+                    languageDisplayName = lang,
+                    profile = profile,
+                    pitch = pitch,
+                    speed = speed,
+                    onComplete = { showLocalTtsSheet = false }
+                )
+            },
+            onDismiss = { showLocalTtsSheet = false }
+        )
+    }
+
+    if (showAutomationConsole) {
+        AutomationConsoleBottomSheet(
+            server = mcpServer,
+            onDismiss = { showAutomationConsole = false }
+        )
+    }
+
     if (state.showProCamera) {
         ProCameraModal(
             createOutputFile = { viewModel.createProCameraOutputFile() },
@@ -806,6 +972,10 @@ private fun StudioTopBar(
     activeQueueCount: Int = 0,
     onOpenRenderQueue: () -> Unit = {},
     onOpenYouTube: () -> Unit = {},
+    workspaceLayoutLabel: String = "Balanced",
+    onCycleWorkspaceLayout: () -> Unit = {},
+    isMcpRunning: Boolean = false,
+    onOpenAutomationConsole: () -> Unit = {},
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onOpenHistory: () -> Unit,
@@ -873,6 +1043,30 @@ private fun StudioTopBar(
                     contentDescription = "YouTube Import and Export",
                     tint = ErrorCrimson,
                     modifier = Modifier.size(19.dp)
+                )
+            }
+
+            IconButton(
+                onClick = onCycleWorkspaceLayout,
+                modifier = Modifier.size(34.dp).testTag("workspace_layout_topbar_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.DashboardCustomize,
+                    contentDescription = "Cycle workspace layout ($workspaceLayoutLabel)",
+                    tint = SilverMuted,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            IconButton(
+                onClick = onOpenAutomationConsole,
+                modifier = Modifier.size(34.dp).testTag("mcp_console_topbar_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Terminal,
+                    contentDescription = "MCP and JSON-RPC Automation Console",
+                    tint = if (isMcpRunning) TrackOverlayEmerald else SilverMuted,
+                    modifier = Modifier.size(18.dp)
                 )
             }
 
@@ -1109,6 +1303,9 @@ private fun ActiveInspectorHost(
     onToggleVoiceover: () -> Unit,
     onToggleOfflineMic: () -> Unit,
     activeAiProviderBadge: String,
+    requiresGoogleSignInForCloud: Boolean = false,
+    onGoogleSignIn: () -> Unit = {},
+    onOpenLocalTtsStudio: () -> Unit = {},
     onOpenAiLoginSetup: () -> Unit,
     onOpenOfflineModelsSetup: () -> Unit
 ) {
@@ -1303,6 +1500,7 @@ private fun ActiveInspectorHost(
                 safeZone = state.timeline.safeZoneOverlay,
                 availableFonts = fonts,
                 activeAiProviderBadge = activeAiProviderBadge,
+                requiresGoogleSignInForCloud = requiresGoogleSignInForCloud,
                 autoCaptionLoading = state.autoCaptionLoading,
                 autoCaptionStatus = state.autoCaptionStatus,
                 autoCaptionError = state.autoCaptionError,
@@ -1313,6 +1511,8 @@ private fun ActiveInspectorHost(
                 onToggleOfflineMicDictation = onToggleOfflineMic,
                 onOpenAiLoginSetup = onOpenAiLoginSetup,
                 onOpenOfflineModelsSetup = onOpenOfflineModelsSetup,
+                onOpenLocalTtsStudio = onOpenLocalTtsStudio,
+                onGoogleSignIn = onGoogleSignIn,
                 onAddCaption = { viewModel.addCaptionAtPlayhead() },
                 onSelectCaption = { id ->
                     viewModel.selectItem(SelectedItem.CaptionItem(id), InspectorTab.CAPTIONS)
@@ -1433,6 +1633,8 @@ private fun ContextualToolRail(
     onDelete: () -> Unit,
     onReorderMainClip: (String, Boolean) -> Unit,
     onReorderOverlay: (String, Boolean) -> Unit,
+    onOpenLocalTts: () -> Unit = {},
+    onOpenAutomationConsole: () -> Unit = {},
     onClearSelection: () -> Unit
 ) {
     Surface(color = StudioSlate) {
@@ -1559,6 +1761,20 @@ private fun ContextualToolRail(
                         isActive = state.activeInspector == InspectorTab.AUDIO,
                         onClick = { onOpenInspector(InspectorTab.AUDIO) },
                         testTag = "tool_audio_mixer"
+                    )
+                    ToolRailButton(
+                        icon = Icons.Default.RecordVoiceOver,
+                        label = "AI Voice",
+                        tint = TrackOverlayEmerald,
+                        onClick = onOpenLocalTts,
+                        testTag = "tool_local_tts_voice"
+                    )
+                    ToolRailButton(
+                        icon = Icons.Default.Terminal,
+                        label = "MCP/RPC",
+                        tint = CinemaAmber,
+                        onClick = onOpenAutomationConsole,
+                        testTag = "tool_automation_mcp"
                     )
                     ToolRailButton(
                         icon = Icons.Default.Compare,

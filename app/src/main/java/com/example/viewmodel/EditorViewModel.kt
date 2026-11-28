@@ -10,6 +10,7 @@ import androidx.media3.common.util.UnstableApi
 import com.example.ai.AiCreativeIdeasResult
 import com.example.ai.GeminiColoristService
 import com.example.ai.MultiProviderTranscriptionEngine
+import com.example.automation.EditorAutomationBridge
 import com.example.data.StudioRepository
 import com.example.history.AddAudioClipCommand
 import com.example.history.AddCaptionsCommand
@@ -61,6 +62,8 @@ import com.example.media.AudioClipExtractor
 import com.example.media.AudioWaveformExtractor
 import com.example.media.CinemaSfxPreset
 import com.example.media.FontResolver
+import com.example.media.LocalTtsVoiceEngine
+import com.example.media.LocalVoiceCloneProfile
 import com.example.media.Media3ExportEngine
 import com.example.media.OfflineSpeechCaptionEngine
 import com.example.media.OfflineSpeechModelManager
@@ -83,7 +86,9 @@ import com.example.model.ColorAdjustments
 import com.example.model.CropRect
 import com.example.model.CutoutBackgroundMode
 import com.example.model.ExportConfig
+import com.example.model.ExportResolution
 import com.example.model.ExportState
+import com.example.model.ExportVideoCodec
 import com.example.model.FilterPreset
 import com.example.model.FxLayer
 import com.example.model.FxShape
@@ -202,7 +207,9 @@ data class EditorUiState(
     val autoCaptionStatus: String? = null,
     val autoCaptionError: String? = null,
     val isLiveMicDictating: Boolean = false,
-    val liveMicPartialText: String = ""
+    val liveMicPartialText: String = "",
+    val localTtsSynthesizing: Boolean = false,
+    val localTtsError: String? = null
 ) {
     val canUndo: Boolean get() = history.canUndo
     val canRedo: Boolean get() = history.canRedo
@@ -3227,6 +3234,178 @@ class EditorViewModel(
                 liveMicPartialText = "",
                 autoCaptionStatus = null
             )
+        }
+    }
+
+    fun synthesizeLocalTtsToTimeline(
+        script: String,
+        languageDisplayName: String,
+        profile: LocalVoiceCloneProfile,
+        pitch: Float,
+        speed: Float,
+        onComplete: () -> Unit = {}
+    ) {
+        pausePlayback()
+        viewModelScope.launch {
+            _uiState.update { it.copy(localTtsSynthesizing = true, localTtsError = null) }
+            val result = LocalTtsVoiceEngine.synthesizeToTimelineWav(
+                context = appContext,
+                text = script,
+                languageDisplayName = languageDisplayName,
+                profile = profile,
+                pitch = pitch,
+                speed = speed
+            )
+            result.onSuccess { synth ->
+                val state = _uiState.value
+                val targetLane = findOpenAudioLane(state.timeline.audioClips, state.playheadMs)
+                val clip = AudioClip(
+                    laneIndex = targetLane,
+                    displayName = synth.displayName,
+                    uri = synth.uriString,
+                    startTimeMs = state.playheadMs,
+                    sourceDurationMs = synth.durationMs,
+                    trimStartMs = 0L,
+                    trimEndMs = synth.durationMs,
+                    waveformPeaks = synth.waveformPeaks
+                )
+                dispatchCommand(
+                    command = AddAudioClipCommand(clip, "Local AI Voice (${profile.displayName})"),
+                    newSelection = SelectedItem.AudioItem(clip.id),
+                    newInspector = InspectorTab.AUDIO
+                )
+                _uiState.update { it.copy(localTtsSynthesizing = false, localTtsError = null) }
+                _feedback.tryEmit("Added offline voice track (${String.format("%.1fs", synth.durationMs / 1000f)})")
+                onComplete()
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        localTtsSynthesizing = false,
+                        localTtsError = err.localizedMessage ?: "Failed to synthesize offline voice."
+                    )
+                }
+            }
+        }
+    }
+
+    val automationBridge: EditorAutomationBridge = object : EditorAutomationBridge {
+        override fun getTimelineSummaryJson(): org.json.JSONObject {
+            val st = _uiState.value
+            return org.json.JSONObject()
+                .put("projectId", st.projectId)
+                .put("projectTitle", st.projectTitle)
+                .put("aspectRatio", st.aspectRatio.label)
+                .put("playheadMs", st.playheadMs)
+                .put("totalDurationMs", st.timeline.totalDurationMs)
+                .put("mainClips", st.timeline.mainClips.size)
+                .put("overlays", st.timeline.overlays.size)
+                .put("audioClips", st.timeline.audioClips.size)
+                .put("captions", st.timeline.captions.size)
+                .put("fxLayers", st.timeline.fxLayers.size)
+                .put("exportResolution", st.exportConfig.resolution.label)
+                .put("exportFps", st.exportConfig.fps)
+                .put("exportCodec", st.exportConfig.codec.label)
+                .put("tenBitColor", st.exportConfig.tenBitColor)
+        }
+
+        override fun addTextOverlay(text: String, durationMs: Long): org.json.JSONObject {
+            val st = _uiState.value
+            val nextZ = (st.timeline.overlays.maxOfOrNull { it.zIndex } ?: 0) + 1
+            val layer = OverlayLayer(
+                type = OverlayType.TEXT,
+                zIndex = nextZ,
+                startTimeMs = st.playheadMs,
+                durationMs = durationMs,
+                text = text,
+                displayName = text.take(24)
+            )
+            viewModelScope.launch {
+                dispatchCommand(
+                    command = AddOverlayCommand(layer, "MCP Add Title"),
+                    newSelection = SelectedItem.OverlayItem(layer.id),
+                    newInspector = InspectorTab.TEXT_STYLE
+                )
+            }
+            return org.json.JSONObject()
+                .put("status", "ok")
+                .put("overlayId", layer.id)
+                .put("text", text)
+                .put("startTimeMs", layer.startTimeMs)
+        }
+
+        override fun addCaption(text: String, durationMs: Long): org.json.JSONObject {
+            val st = _uiState.value
+            val cue = CaptionClip(
+                text = text,
+                startTimeMs = st.playheadMs,
+                endTimeMs = st.playheadMs + durationMs,
+                animationPreset = CaptionAnimationPreset.ACTIVE_WORD_HIGHLIGHT
+            )
+            viewModelScope.launch {
+                dispatchCommand(
+                    command = AddCaptionsCommand(listOf(cue), "MCP Add Caption"),
+                    newSelection = SelectedItem.CaptionItem(cue.id),
+                    newInspector = InspectorTab.CAPTIONS
+                )
+            }
+            return org.json.JSONObject()
+                .put("status", "ok")
+                .put("captionId", cue.id)
+                .put("startTimeMs", cue.startTimeMs)
+                .put("endTimeMs", cue.endTimeMs)
+        }
+
+        override fun splitAtPlayhead(): org.json.JSONObject {
+            val atMs = _uiState.value.playheadMs
+            viewModelScope.launch { splitSelectedAtPlayhead() }
+            return org.json.JSONObject().put("status", "ok").put("splitAtMs", atMs)
+        }
+
+        override fun applyFilterPreset(presetName: String): org.json.JSONObject {
+            val preset = FilterPreset.entries.firstOrNull {
+                it.name.equals(presetName, ignoreCase = true) ||
+                    it.displayName.equals(presetName, ignoreCase = true)
+            } ?: FilterPreset.TEAL_ORANGE
+            viewModelScope.launch { updateSelectedFilter(preset, 1f) }
+            return org.json.JSONObject().put("status", "ok").put("appliedFilter", preset.name)
+        }
+
+        override fun setExportSettings(
+            resolution: String?,
+            fps: Int?,
+            codec: String?,
+            tenBit: Boolean?
+        ): org.json.JSONObject {
+            val current = _uiState.value.exportConfig
+            val nextRes = when (resolution?.uppercase()) {
+                "720P", "HD_720P" -> ExportResolution.HD_720P
+                "1080P", "FHD_1080P" -> ExportResolution.FHD_1080P
+                "4K", "UHD_4K" -> ExportResolution.UHD_4K
+                else -> current.resolution
+            }
+            val nextFps = fps?.takeIf { it in listOf(24, 30, 60) } ?: current.fps
+            val nextCodec = if (codec != null) ExportVideoCodec.fromNameOrDefault(codec) else current.codec
+            val nextTenBit = tenBit ?: current.tenBitColor
+            val updated = current.copy(
+                resolution = nextRes,
+                fps = nextFps,
+                codec = nextCodec,
+                tenBitColor = nextTenBit
+            )
+            viewModelScope.launch { updateExportConfig(updated) }
+            return org.json.JSONObject()
+                .put("status", "ok")
+                .put("resolution", updated.resolution.label)
+                .put("fps", updated.fps)
+                .put("codec", updated.codec.label)
+                .put("tenBitColor", updated.tenBitColor)
+        }
+
+        override fun queueBackgroundRender(): org.json.JSONObject {
+            viewModelScope.launch { queueCurrentProjectForBackgroundExport() }
+            return org.json.JSONObject()
+                .put("status", "queued")
+                .put("projectId", _uiState.value.projectId)
         }
     }
 

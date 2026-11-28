@@ -157,7 +157,8 @@ class Media3ExportEngine(private val context: Context) {
 
         val (targetW, targetH) = aspectRatio.exportDimensions(config.resolution)
         val clampedBitrateBps = (config.bitrateMbps.coerceIn(4, 60) * 1_000_000)
-        val settingsSummary = "${config.resolution.label} • ${config.fps}fps • ${config.bitrateMbps} Mbps"
+        val bitDepthTag = if (config.tenBitColor) "10-bit HDR" else "8-bit"
+        val settingsSummary = "${config.resolution.label} • ${config.fps}fps • ${config.codec.label} $bitDepthTag • ${config.bitrateMbps} Mbps"
 
         scope.launch {
             val prepResult = withContext(Dispatchers.IO) {
@@ -207,6 +208,7 @@ class Media3ExportEngine(private val context: Context) {
                         targetW = targetW,
                         targetH = targetH,
                         fps = config.fps,
+                        tenBitColor = config.tenBitColor,
                         availableFonts = availableFonts,
                         overlayBitmaps = overlayBitmaps,
                         silenceWavFile = silenceWavFile
@@ -221,7 +223,7 @@ class Media3ExportEngine(private val context: Context) {
                         .build()
 
                     val transformer = Transformer.Builder(context)
-                        .setVideoMimeType(MimeTypes.VIDEO_H264)
+                        .setVideoMimeType(config.codec.mimeType)
                         .setAudioMimeType(MimeTypes.AUDIO_AAC)
                         .setEncoderFactory(encoderFactory)
                         .addListener(object : Transformer.Listener {
@@ -324,6 +326,7 @@ class Media3ExportEngine(private val context: Context) {
         targetW: Int,
         targetH: Int,
         fps: Int,
+        tenBitColor: Boolean,
         availableFonts: List<StudioFont>,
         overlayBitmaps: Map<String, Bitmap>,
         silenceWavFile: File? = null
@@ -765,6 +768,10 @@ class Media3ExportEngine(private val context: Context) {
         }
 
         val compBuilder = Composition.Builder(sequences)
+            .setHdrMode(
+                if (tenBitColor) Composition.HDR_MODE_KEEP_HDR
+                else Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL
+            )
         if (videoOverlaysDesc.isNotEmpty()) {
             compBuilder.setVideoCompositorSettings(
                 object : VideoCompositorSettings {

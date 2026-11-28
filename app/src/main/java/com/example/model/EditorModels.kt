@@ -474,7 +474,9 @@ enum class KeyframeEasing(val displayName: String) {
     LINEAR("Linear"),
     EASE_IN("Ease In"),
     EASE_OUT("Ease Out"),
-    EASE_IN_OUT("Ease In-Out")
+    EASE_IN_OUT("Ease In-Out"),
+    SPRING("Spring"),
+    HOLD("Hold")
 }
 
 @JsonClass(generateAdapter = true)
@@ -752,15 +754,34 @@ enum class ExportBitrateTier(val label: String, val mbps: Int) {
     MASTER("Master", 50)
 }
 
+enum class ExportVideoCodec(
+    val label: String,
+    val badge: String,
+    val mimeType: String,
+    val efficiencyFactor: Float
+) {
+    H264("H.264", "Universal AVC", "video/avc", 1.0f),
+    HEVC("HEVC", "H.265 • 10-bit", "video/hevc", 0.72f),
+    AV1("AV1", "Next-Gen Open", "video/av01", 0.58f);
+
+    companion object {
+        fun fromNameOrDefault(name: String?): ExportVideoCodec =
+            entries.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: H264
+    }
+}
+
 data class ExportConfig(
     val resolution: ExportResolution = ExportResolution.FHD_1080P,
     val fps: Int = 30,
-    val bitrateMbps: Int = 16
+    val bitrateMbps: Int = 16,
+    val codec: ExportVideoCodec = ExportVideoCodec.H264,
+    val tenBitColor: Boolean = false
 ) {
     fun estimateFileSizeMb(durationMs: Long): Float {
         val seconds = (durationMs.coerceAtLeast(1000L) / 1000f)
-        // Video bitrate + 192 kbps AAC audio overhead
-        val totalBitsPerSec = (bitrateMbps * 1_000_000f) + 192_000f
+        // Video bitrate (adjusted subtly for HEVC/AV1 compression efficiency) + 192 kbps AAC audio overhead
+        val effectiveVideoBps = bitrateMbps * 1_000_000f * codec.efficiencyFactor * (if (tenBitColor) 1.12f else 1.0f)
+        val totalBitsPerSec = effectiveVideoBps + 192_000f
         return ((totalBitsPerSec / 8f) * seconds / (1024f * 1024f)).coerceAtLeast(0.1f)
     }
 }

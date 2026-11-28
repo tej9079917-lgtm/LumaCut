@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
 <resources>
+    <string name="firestore_database_id" translatable="false">ai-studio-android-lumacut-14f53c35-8d23-4fd3-b8fb-7922843ba0a9</string>
     <string name="recaptcha_site_key" translatable="false">6LdcDzQuAAAAACEZmDBPh2qmfjBXv9iFdNNWXn6k</string>
 </resources>

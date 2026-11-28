@@ -27,8 +27,10 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Login
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.OfflineBolt
+import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -82,6 +84,7 @@ fun CaptionStudioInspector(
     safeZone: SafeZoneOverlay,
     availableFonts: List<StudioFont>,
     activeAiProviderBadge: String = "Built-in Gemini",
+    requiresGoogleSignInForCloud: Boolean = false,
     autoCaptionLoading: Boolean = false,
     autoCaptionStatus: String? = null,
     autoCaptionError: String? = null,
@@ -92,6 +95,8 @@ fun CaptionStudioInspector(
     onToggleOfflineMicDictation: () -> Unit = {},
     onOpenAiLoginSetup: () -> Unit = {},
     onOpenOfflineModelsSetup: () -> Unit = {},
+    onOpenLocalTtsStudio: () -> Unit = {},
+    onGoogleSignIn: () -> Unit = {},
     onAddCaption: () -> Unit,
     onSelectCaption: (String) -> Unit,
     onUpdateCaption: ((CaptionClip) -> CaptionClip) -> Unit,
@@ -308,6 +313,29 @@ fun CaptionStudioInspector(
                     }
                 }
 
+                if (requiresGoogleSignInForCloud) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(AmberContainer.copy(alpha = 0.55f))
+                            .border(1.dp, CinemaAmber.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
+                            .clickable { onGoogleSignIn() }
+                            .padding(horizontal = 10.dp, vertical = 7.dp)
+                            .testTag("caption_inline_google_signin"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(Icons.Default.Login, contentDescription = null, tint = CinemaAmber, modifier = Modifier.size(16.dp))
+                        Text(
+                            text = "Sign in with Google for Cloud Gemini AI (or use Offline AI free)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = ChalkWhite,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+
                 if (isLiveMicDictating) {
                     Text(
                         text = if (liveMicPartialText.isNotBlank()) "Listening: \"$liveMicPartialText\"" else "Listening offline… speak while playing or scrubbing.",
@@ -376,6 +404,18 @@ fun CaptionStudioInspector(
                     Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(15.dp))
                     Spacer(modifier = Modifier.width(3.dp))
                     Text("Export SRT", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                }
+                FilledTonalButton(
+                    onClick = onOpenLocalTtsStudio,
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = ActiveRail,
+                        contentColor = TrackOverlayEmerald
+                    ),
+                    modifier = Modifier.weight(1f).height(36.dp).testTag("btn_open_local_tts")
+                ) {
+                    Icon(Icons.Default.RecordVoiceOver, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text("TTS Dub", style = MaterialTheme.typography.labelSmall, maxLines = 1)
                 }
             }
 

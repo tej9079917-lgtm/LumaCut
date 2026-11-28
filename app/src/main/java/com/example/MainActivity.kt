@@ -15,10 +15,12 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import androidx.lifecycle.lifecycleScope
 import com.example.ai.configureAppCheck
 import com.example.data.AppDatabase
 import com.example.data.LocalMediaStorage
 import com.example.data.StudioRepository
+import com.example.security.FirebaseAuthManager
 import com.example.ui.screens.EditorScreen
 import com.example.ui.screens.ProjectHubScreen
 import com.example.ui.theme.LumaCutTheme
@@ -32,6 +34,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         configureAppCheck(this, intent)
+        FirebaseAuthManager.getInstance(this).attemptSilentAutoSignIn(this, lifecycleScope)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
