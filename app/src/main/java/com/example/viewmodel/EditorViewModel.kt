@@ -65,6 +65,7 @@ import com.example.media.FontResolver
 import com.example.media.LocalTtsVoiceEngine
 import com.example.media.LocalVoiceCloneProfile
 import com.example.media.Media3ExportEngine
+import com.example.media.OfflineLanguageCatalog
 import com.example.media.OfflineSpeechCaptionEngine
 import com.example.media.OfflineSpeechModelManager
 import com.example.media.RenderQueueManager
@@ -3174,16 +3175,18 @@ class EditorViewModel(
         }
     }
 
-    fun startOfflineMicDictation() {
+    fun startOfflineMicDictation(languageHint: String = "Auto") {
         if (_uiState.value.isLiveMicDictating) return
         if (_uiState.value.isRecordingVoiceover) stopVoiceoverRecording()
+        val langTag = OfflineLanguageCatalog.bcp47ForName(languageHint)
         _uiState.update {
             it.copy(
                 autoCaptionError = null,
-                autoCaptionStatus = "Listening via device mic…"
+                autoCaptionStatus = "Listening ($languageHint) via device mic…"
             )
         }
         offlineSpeechEngine.start(
+            languageTag = langTag,
             currentPlayheadMs = { _uiState.value.playheadMs },
             onPartialText = { partial ->
                 _uiState.update { it.copy(liveMicPartialText = partial) }

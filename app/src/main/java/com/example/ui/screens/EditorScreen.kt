@@ -314,11 +314,13 @@ fun EditorScreen(
         }
     }
 
+    var pendingOfflineMicLanguage by remember { mutableStateOf("Auto") }
+
     val requestOfflineMicPermission = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
-            viewModel.startOfflineMicDictation()
+            viewModel.startOfflineMicDictation(pendingOfflineMicLanguage)
         }
     }
 
@@ -338,16 +340,17 @@ fun EditorScreen(
         }
     }
 
-    val onToggleOfflineMic: () -> Unit = {
+    val onToggleOfflineMic: (String) -> Unit = { languageHint ->
         if (state.isLiveMicDictating) {
             viewModel.stopOfflineMicDictation()
         } else {
+            pendingOfflineMicLanguage = languageHint
             val hasMic = ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.RECORD_AUDIO
             ) == PackageManager.PERMISSION_GRANTED
             if (hasMic) {
-                viewModel.startOfflineMicDictation()
+                viewModel.startOfflineMicDictation(languageHint)
             } else {
                 requestOfflineMicPermission.launch(Manifest.permission.RECORD_AUDIO)
             }
@@ -1301,7 +1304,7 @@ private fun ActiveInspectorHost(
     onExportSrt: () -> Unit,
     onPickCutoutBackground: () -> Unit,
     onToggleVoiceover: () -> Unit,
-    onToggleOfflineMic: () -> Unit,
+    onToggleOfflineMic: (String) -> Unit,
     activeAiProviderBadge: String,
     requiresGoogleSignInForCloud: Boolean = false,
     onGoogleSignIn: () -> Unit = {},

@@ -80,7 +80,7 @@ class OfflineSpeechCaptionEngine(private val context: Context) {
         }
     }
 
-    private fun launchRecognitionCycle(languageTag: String) {
+    private fun launchRecognitionCycle(languageTag: String, preferOffline: Boolean = true) {
         if (!isListening) return
         runCatching { recognizer?.destroy() }
 
@@ -126,7 +126,7 @@ class OfflineSpeechCaptionEngine(private val context: Context) {
                 }
                 onPartialCallback("")
                 if (isListening) {
-                    mainHandler.postDelayed({ launchRecognitionCycle(languageTag) }, 160L)
+                    mainHandler.postDelayed({ launchRecognitionCycle(languageTag, preferOffline) }, 160L)
                 }
             }
 
@@ -134,19 +134,29 @@ class OfflineSpeechCaptionEngine(private val context: Context) {
                 val recoverable = error == SpeechRecognizer.ERROR_NO_MATCH ||
                     error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
                 if (recoverable && isListening) {
-                    mainHandler.postDelayed({ launchRecognitionCycle(languageTag) }, 220L)
+                    mainHandler.postDelayed({ launchRecognitionCycle(languageTag, preferOffline) }, 220L)
+                    return
+                }
+                val needsOnlineFallback = preferOffline && (
+                    error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+                        error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ||
+                        error == SpeechRecognizer.ERROR_NETWORK ||
+                        error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT
+                    )
+                if (needsOnlineFallback && isListening) {
+                    mainHandler.postDelayed({ launchRecognitionCycle(languageTag, preferOffline = false) }, 180L)
                     return
                 }
                 val readable = when (error) {
                     SpeechRecognizer.ERROR_AUDIO -> "Microphone audio error."
                     SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission required for live dictation."
                     SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
-                        "Speech recognizer needed offline voice pack. Enable offline speech in Android settings."
+                        "No offline pack for $languageTag and no internet connection. Enable Wi-Fi or download an offline pack."
                     SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Speech recognizer busy—retrying."
                     else -> "Live mic dictation stopped (code $error)."
                 }
                 if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY && isListening) {
-                    mainHandler.postDelayed({ launchRecognitionCycle(languageTag) }, 350L)
+                    mainHandler.postDelayed({ launchRecognitionCycle(languageTag, preferOffline) }, 350L)
                     return
                 }
                 onErrorCallback(readable)
@@ -160,7 +170,7 @@ class OfflineSpeechCaptionEngine(private val context: Context) {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, languageTag)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, preferOffline)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
         runCatching {

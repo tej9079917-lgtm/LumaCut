@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -117,6 +118,7 @@ fun AiCaptionSetupBottomSheet(
     val offlinePacks by offlineManager.packs.collectAsStateWithLifecycle()
     val offlineStatusMsg by offlineManager.statusMessage.collectAsStateWithLifecycle()
     val isOfflineCapable by offlineManager.isOnDeviceSupported.collectAsStateWithLifecycle()
+    val needsSpeechSetup by offlineManager.needsSpeechServicesSetup.collectAsStateWithLifecycle()
 
     var selectedTab by remember(initialTab) { mutableIntStateOf(initialTab.coerceIn(0, 1)) }
     var focusedProvider by remember(aiCredState.activeProvider) { mutableStateOf(aiCredState.activeProvider) }
@@ -516,6 +518,39 @@ fun AiCaptionSetupBottomSheet(
                         }
                     }
 
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { openAndroidSpeechSettings(context) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(38.dp)
+                                .testTag("open_speech_settings_button")
+                        ) {
+                            Text(
+                                text = "Speech Settings",
+                                color = if (needsSpeechSetup) CinemaAmber else ChalkWhite,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = { openGoogleSpeechServicesApp(context) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(38.dp)
+                                .testTag("open_google_speech_app_button")
+                        ) {
+                            Text(
+                                text = "Enable Google Speech",
+                                color = if (needsSpeechSetup) CinemaAmber else TrackOverlayEmerald,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(
                         value = langSearch,
@@ -614,16 +649,18 @@ private fun OfflineLanguagePackRow(
                     color = ChalkWhite
                 )
                 Text(
-                    text = when (pack.status) {
+                    text = pack.note ?: when (pack.status) {
                         OfflinePackStatus.INSTALLED -> "Installed • Ready offline"
                         OfflinePackStatus.DOWNLOADING -> "Downloading… ${pack.downloadProgress}%"
+                        OfflinePackStatus.ONLINE_ONLY -> "No offline pack on this phone • Device Speech ready"
                         OfflinePackStatus.NOT_SUPPORTED -> "Android 13+ required"
-                        else -> "On-device pack (${pack.spec.bcp47})"
+                        else -> "On-device pack (${pack.deviceLocaleTag ?: pack.spec.bcp47})"
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = when (pack.status) {
                         OfflinePackStatus.INSTALLED -> TrackOverlayEmerald
                         OfflinePackStatus.DOWNLOADING -> CinemaAmber
+                        OfflinePackStatus.ONLINE_ONLY -> CinemaAmber
                         else -> SilverMuted
                     }
                 )
@@ -641,6 +678,25 @@ private fun OfflineLanguagePackRow(
                         }
                     } else {
                         Icon(Icons.Default.CheckCircle, contentDescription = "Installed", tint = TrackOverlayEmerald)
+                    }
+                }
+                OfflinePackStatus.ONLINE_ONLY -> {
+                    if (onUseNow != null) {
+                        Button(
+                            onClick = onUseNow,
+                            colors = ButtonDefaults.buttonColors(containerColor = CinemaAmber, contentColor = OnAmber),
+                            modifier = Modifier.height(36.dp)
+                        ) {
+                            Text("Transcribe", style = MaterialTheme.typography.labelMedium)
+                        }
+                    } else {
+                        OutlinedButton(
+                            enabled = enabled,
+                            onClick = onDownload,
+                            modifier = Modifier.height(36.dp)
+                        ) {
+                            Text("Retry", color = ChalkWhite, style = MaterialTheme.typography.labelMedium)
+                        }
                     }
                 }
                 OfflinePackStatus.DOWNLOADING -> {
@@ -677,6 +733,34 @@ private fun OfflineLanguagePackRow(
             )
         }
     }
+}
+
+private fun openAndroidSpeechSettings(context: Context) {
+    val intents = listOf(
+        Intent(Settings.ACTION_VOICE_INPUT_SETTINGS),
+        Intent("com.android.settings.TTS_SETTINGS"),
+        Intent(Settings.ACTION_INPUT_METHOD_SETTINGS),
+        Intent(Settings.ACTION_SETTINGS)
+    )
+    for (intent in intents) {
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (runCatching { context.startActivity(intent) }.isSuccess) return
+    }
+}
+
+private fun openGoogleSpeechServicesApp(context: Context) {
+    val pkg = "com.google.android.tts"
+    val appDetails = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$pkg"))
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val playMarket = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$pkg"))
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val playWeb = Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=$pkg"))
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    val isInstalled = runCatching { context.packageManager.getPackageInfo(pkg, 0) }.isSuccess
+    if (isInstalled && runCatching { context.startActivity(appDetails) }.isSuccess) return
+    if (runCatching { context.startActivity(playMarket) }.isSuccess) return
+    runCatching { context.startActivity(playWeb) }
 }
 
 private tailrec fun Context.findAuthActivity(): Activity? = when (this) {

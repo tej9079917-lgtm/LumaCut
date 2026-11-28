@@ -92,7 +92,7 @@ fun CaptionStudioInspector(
     liveMicPartialText: String = "",
     onRunGeminiAutoCaptions: (String) -> Unit = {},
     onRunOfflineVideoAutoCaptions: (String) -> Unit = {},
-    onToggleOfflineMicDictation: () -> Unit = {},
+    onToggleOfflineMicDictation: (String) -> Unit = {},
     onOpenAiLoginSetup: () -> Unit = {},
     onOpenOfflineModelsSetup: () -> Unit = {},
     onOpenLocalTtsStudio: () -> Unit = {},
@@ -288,7 +288,7 @@ fun CaptionStudioInspector(
                     }
 
                     FilledTonalButton(
-                        onClick = onToggleOfflineMicDictation,
+                        onClick = { onToggleOfflineMicDictation(selectedLanguage) },
                         enabled = !autoCaptionLoading,
                         colors = ButtonDefaults.filledTonalButtonColors(
                             containerColor = if (isLiveMicDictating) ErrorCrimson else ActiveRail,

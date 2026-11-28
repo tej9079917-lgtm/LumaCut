@@ -1,7 +1,10 @@
 package com.example
 
+import android.speech.SpeechRecognizer
 import com.example.automation.EditorAutomationBridge
 import com.example.automation.LocalMcpJsonRpcServer
+import com.example.media.OfflineLanguageCatalog
+import com.example.media.OfflineSpeechModelManager
 import com.example.model.ExportConfig
 import com.example.model.ExportResolution
 import com.example.model.ExportVideoCodec
@@ -108,5 +111,25 @@ class StudioV5ProSuiteTest {
         )
         val contentText = callResp.getJSONObject("result").getJSONArray("content").getJSONObject(0).getString("text")
         assertTrue(contentText.contains("Hello MCP"))
+    }
+
+    @Test
+    fun offlineSpeechModelManager_mapsTeluguBcp47AndDecodesSpeechErrors() {
+        assertEquals("te-IN", OfflineLanguageCatalog.bcp47ForName("Telugu"))
+
+        val unsupportedMsg = OfflineSpeechModelManager.describeSpeechError(
+            "Telugu",
+            SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED
+        )
+        assertTrue(unsupportedMsg.contains("Telugu"))
+        assertTrue(unsupportedMsg.contains("code 12"))
+        assertTrue(unsupportedMsg.contains("Transcribe"))
+
+        val cannotCheckMsg = OfflineSpeechModelManager.describeSpeechError(
+            "Telugu",
+            SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT
+        )
+        assertTrue(cannotCheckMsg.contains("Enable Google Speech"))
+        assertTrue(cannotCheckMsg.contains("code 14"))
     }
 }

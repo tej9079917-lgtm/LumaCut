@@ -40,6 +40,7 @@ data class OfflineLanguageSpec(
 enum class OfflinePackStatus {
     UNKNOWN,
     NOT_SUPPORTED,
+    ONLINE_ONLY,
     AVAILABLE_TO_DOWNLOAD,
     DOWNLOADING,
     INSTALLED
@@ -48,7 +49,9 @@ enum class OfflinePackStatus {
 data class OfflineLanguagePackState(
     val spec: OfflineLanguageSpec,
     val status: OfflinePackStatus = OfflinePackStatus.UNKNOWN,
-    val downloadProgress: Int = 0
+    val downloadProgress: Int = 0,
+    val deviceLocaleTag: String? = null,
+    val note: String? = null
 )
 
 /**
@@ -98,11 +101,11 @@ object OfflineLanguageCatalog {
 
 /**
  * Play-Policy compliant Offline All-Language Speech Model Manager & Video-to-Caption Engine.
- * Uses Android's official on-device SpeechRecognizer APIs (API 33+):
- * - `checkRecognitionSupport` to detect installed vs downloadable offline language packs
- * - `triggerModelDownload` with live `ModelDownloadListener` progress (ZERO dynamic `.so`/`.dex` loading)
- * - `RecognizerIntent.EXTRA_AUDIO_SOURCE` (`ParcelFileDescriptor` pipe) to transcribe extracted 16kHz PCM
- *   video audio 100% offline without requiring a microphone or cloud key!
+ * Uses Android's official SpeechRecognizer APIs (API 33+):
+ * - `checkRecognitionSupport` against both On-Device & Default System Speech Services
+ * - Exact device-advertised locale tag matching so `triggerModelDownload` succeeds across OEMs
+ * - Automatic fallback to System Google Speech Services (`EXTRA_AUDIO_SOURCE` PCM pipe) when
+ *   a specific language (such as Telugu on some OEM phones) is online-only in Google Speech Services.
  */
 class OfflineSpeechModelManager private constructor(private val appContext: Context) {
 
@@ -120,81 +123,166 @@ class OfflineSpeechModelManager private constructor(private val appContext: Cont
     private val _statusMessage = MutableStateFlow<String?>(null)
     val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
 
+    private val _needsSpeechServicesSetup = MutableStateFlow(false)
+    val needsSpeechServicesSetup: StateFlow<Boolean> = _needsSpeechServicesSetup.asStateFlow()
+
     private fun checkDeviceCapable(): Boolean {
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
+        return SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext) ||
+            SpeechRecognizer.isRecognitionAvailable(appContext)
     }
 
     fun refreshInstalledModels() {
-        val supported = checkDeviceCapable()
+        val hasOnDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)
+        val hasSystem = SpeechRecognizer.isRecognitionAvailable(appContext)
+        val supported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && (hasOnDevice || hasSystem)
         _isOnDeviceSupported.value = supported
+
         if (!supported || Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            _needsSpeechServicesSetup.value = true
             _packs.value = OfflineLanguageCatalog.languages.map {
                 OfflineLanguagePackState(it, OfflinePackStatus.NOT_SUPPORTED, 0)
             }
             _statusMessage.value =
-                "On-device video transcription requires Android 13+ with Google Speech Services. Offline Mic & AI Login work on all devices."
+                "Enable 'Speech Recognition & Synthesis from Google' (Android 13+) for offline models, or use Cloud AI."
             return
         }
 
         mainHandler.post {
-            val recognizer = runCatching {
+            querySupportWithRecognizer(preferOnDevice = hasOnDevice, allowRetryFallback = hasOnDevice && hasSystem)
+        }
+    }
+
+    private fun querySupportWithRecognizer(preferOnDevice: Boolean, allowRetryFallback: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val recognizer = runCatching {
+            if (preferOnDevice && SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)) {
                 SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext)
-            }.getOrNull()
-            if (recognizer == null) {
-                _statusMessage.value = "On-device speech engine unavailable on this device."
-                return@post
+            } else {
+                SpeechRecognizer.createSpeechRecognizer(appContext)
             }
+        }.getOrNull()
 
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+        if (recognizer == null) {
+            if (allowRetryFallback) {
+                querySupportWithRecognizer(preferOnDevice = false, allowRetryFallback = false)
+            } else {
+                _needsSpeechServicesSetup.value = true
+                _statusMessage.value = "Speech engine unavailable. Tap 'Enable Google Speech' below."
             }
+            return
+        }
 
-            runCatching {
-                recognizer.checkRecognitionSupport(
-                    intent,
-                    callbackExecutor,
-                    object : RecognitionSupportCallback {
-                        override fun onSupportResult(recognitionSupport: RecognitionSupport) {
-                            val installed = recognitionSupport.installedOnDeviceLanguages
-                                .map { normalizeLocaleTag(it) }.toSet()
-                            val pending = recognitionSupport.pendingOnDeviceLanguages
-                                .map { normalizeLocaleTag(it) }.toSet()
-                            val supportedAll = recognitionSupport.supportedOnDeviceLanguages
-                                .map { normalizeLocaleTag(it) }.toSet()
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        }
 
-                            _packs.value = OfflineLanguageCatalog.languages.map { spec ->
-                                val tag = normalizeLocaleTag(spec.bcp47)
-                                val base = spec.iso6391.lowercase(Locale.US)
-                                val status = when {
-                                    installed.any { matchesLocale(it, tag, base) } -> OfflinePackStatus.INSTALLED
-                                    pending.any { matchesLocale(it, tag, base) } -> OfflinePackStatus.DOWNLOADING
-                                    supportedAll.any { matchesLocale(it, tag, base) } -> OfflinePackStatus.AVAILABLE_TO_DOWNLOAD
-                                    else -> OfflinePackStatus.AVAILABLE_TO_DOWNLOAD
-                                }
-                                OfflineLanguagePackState(
-                                    spec = spec,
-                                    status = status,
-                                    downloadProgress = if (status == OfflinePackStatus.INSTALLED) 100 else 0
+        runCatching {
+            recognizer.checkRecognitionSupport(
+                intent,
+                callbackExecutor,
+                object : RecognitionSupportCallback {
+                    override fun onSupportResult(recognitionSupport: RecognitionSupport) {
+                        val installedRaw = recognitionSupport.installedOnDeviceLanguages
+                        val pendingRaw = recognitionSupport.pendingOnDeviceLanguages
+                        val supportedRaw = recognitionSupport.supportedOnDeviceLanguages
+                        val onlineRaw = recognitionSupport.onlineLanguages
+
+                        val allOnDeviceEmpty = installedRaw.isEmpty() && pendingRaw.isEmpty() && supportedRaw.isEmpty()
+                        if (allOnDeviceEmpty && allowRetryFallback) {
+                            mainHandler.post {
+                                runCatching { recognizer.destroy() }
+                                querySupportWithRecognizer(preferOnDevice = false, allowRetryFallback = false)
+                            }
+                            return
+                        }
+
+                        _needsSpeechServicesSetup.value = allOnDeviceEmpty && onlineRaw.isEmpty()
+                        _packs.value = OfflineLanguageCatalog.languages.map { spec ->
+                            val tag = normalizeLocaleTag(spec.bcp47)
+                            val base = spec.iso6391.lowercase(Locale.US)
+
+                            val matchedInstalled = installedRaw.firstOrNull { matchesLocale(normalizeLocaleTag(it), tag, base) }
+                            val matchedPending = pendingRaw.firstOrNull { matchesLocale(normalizeLocaleTag(it), tag, base) }
+                            val matchedSupported = supportedRaw.firstOrNull { matchesLocale(normalizeLocaleTag(it), tag, base) }
+                            val matchedOnline = onlineRaw.firstOrNull { matchesLocale(normalizeLocaleTag(it), tag, base) }
+
+                            val (status, exactTag, note) = when {
+                                matchedInstalled != null -> Triple(
+                                    OfflinePackStatus.INSTALLED,
+                                    matchedInstalled,
+                                    "Installed • 100% Offline"
+                                )
+                                matchedPending != null -> Triple(
+                                    OfflinePackStatus.DOWNLOADING,
+                                    matchedPending,
+                                    "Download in progress…"
+                                )
+                                matchedSupported != null -> Triple(
+                                    OfflinePackStatus.AVAILABLE_TO_DOWNLOAD,
+                                    matchedSupported,
+                                    "Offline pack ready to download ($matchedSupported)"
+                                )
+                                matchedOnline != null -> Triple(
+                                    OfflinePackStatus.ONLINE_ONLY,
+                                    matchedOnline,
+                                    "No offline pack from Google on this phone — Device Speech & Cloud AI supported"
+                                )
+                                supportedRaw.isEmpty() -> Triple(
+                                    OfflinePackStatus.AVAILABLE_TO_DOWNLOAD,
+                                    spec.bcp47,
+                                    "Tap Download or check Google Speech Services"
+                                )
+                                else -> Triple(
+                                    OfflinePackStatus.ONLINE_ONLY,
+                                    spec.bcp47,
+                                    "Google doesn't ship an offline ${spec.displayName} pack on this device — use Transcribe or Cloud AI"
                                 )
                             }
-                            val installedCount = _packs.value.count { it.status == OfflinePackStatus.INSTALLED }
-                            _statusMessage.value = "$installedCount offline language pack${if (installedCount == 1) "" else "s"} ready on device"
-                            mainHandler.post { runCatching { recognizer.destroy() } }
+
+                            OfflineLanguagePackState(
+                                spec = spec,
+                                status = status,
+                                downloadProgress = if (status == OfflinePackStatus.INSTALLED) 100 else 0,
+                                deviceLocaleTag = exactTag,
+                                note = note
+                            )
                         }
 
-                        override fun onError(error: Int) {
-                            _packs.value = OfflineLanguageCatalog.languages.map {
-                                OfflineLanguagePackState(it, OfflinePackStatus.AVAILABLE_TO_DOWNLOAD, 0)
+                        val installedCount = _packs.value.count { it.status == OfflinePackStatus.INSTALLED }
+                        val downloadableCount = _packs.value.count { it.status == OfflinePackStatus.AVAILABLE_TO_DOWNLOAD }
+                        _statusMessage.value =
+                            "$installedCount offline pack${if (installedCount == 1) "" else "s"} installed • $downloadableCount downloadable on this device"
+                        mainHandler.post { runCatching { recognizer.destroy() } }
+                    }
+
+                    override fun onError(error: Int) {
+                        mainHandler.post {
+                            runCatching { recognizer.destroy() }
+                            if (allowRetryFallback) {
+                                querySupportWithRecognizer(preferOnDevice = false, allowRetryFallback = false)
+                            } else {
+                                _needsSpeechServicesSetup.value = true
+                                _packs.value = OfflineLanguageCatalog.languages.map {
+                                    OfflineLanguagePackState(
+                                        spec = it,
+                                        status = OfflinePackStatus.AVAILABLE_TO_DOWNLOAD,
+                                        downloadProgress = 0,
+                                        deviceLocaleTag = it.bcp47,
+                                        note = "Tap Download or enable Google Speech Services"
+                                    )
+                                }
+                                _statusMessage.value = describeSpeechError("Model check", error)
                             }
-                            _statusMessage.value = "Tap Download on any language to install its offline model"
-                            mainHandler.post { runCatching { recognizer.destroy() } }
                         }
                     }
-                )
-            }.onFailure {
-                runCatching { recognizer.destroy() }
+                }
+            )
+        }.onFailure {
+            runCatching { recognizer.destroy() }
+            if (allowRetryFallback) {
+                querySupportWithRecognizer(preferOnDevice = false, allowRetryFallback = false)
             }
         }
     }
@@ -204,86 +292,168 @@ class OfflineSpeechModelManager private constructor(private val appContext: Cont
             _statusMessage.value = "Offline pack downloads require Android 13+."
             return
         }
-        updatePack(spec.bcp47, OfflinePackStatus.DOWNLOADING, 5)
+        val currentPack = _packs.value.firstOrNull { it.spec.bcp47.equals(spec.bcp47, ignoreCase = true) }
+        val primaryTag = currentPack?.deviceLocaleTag?.takeIf { it.isNotBlank() } ?: spec.bcp47
+        val candidateTags = listOf(primaryTag, spec.bcp47, spec.iso6391)
+            .distinctBy { it.lowercase(Locale.US) }
+
+        updatePack(spec.bcp47, OfflinePackStatus.DOWNLOADING, 5, "Requesting ${spec.displayName} model…")
         _statusMessage.value = "Downloading ${spec.displayName} (${spec.nativeLabel}) offline model…"
 
         mainHandler.post {
-            val recognizer = runCatching {
-                SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext)
-            }.getOrNull()
-            if (recognizer == null) {
-                updatePack(spec.bcp47, OfflinePackStatus.AVAILABLE_TO_DOWNLOAD, 0)
-                _statusMessage.value = "On-device Speech Services not available on this phone."
+            val attempts = buildList {
+                if (SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)) {
+                    candidateTags.forEach { tag -> add(true to tag) }
+                }
+                if (SpeechRecognizer.isRecognitionAvailable(appContext)) {
+                    add(false to primaryTag)
+                }
+            }
+            if (attempts.isEmpty()) {
+                _needsSpeechServicesSetup.value = true
+                updatePack(spec.bcp47, OfflinePackStatus.NOT_SUPPORTED, 0, "Google Speech Services disabled")
+                _statusMessage.value = "Enable 'Speech Recognition & Synthesis from Google' in Android Settings."
                 return@post
             }
+            runDownloadAttempt(spec = spec, attempts = attempts, attemptIndex = 0)
+        }
+    }
 
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, spec.bcp47)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+    private fun runDownloadAttempt(
+        spec: OfflineLanguageSpec,
+        attempts: List<Pair<Boolean, String>>,
+        attemptIndex: Int
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (attemptIndex >= attempts.size) {
+            updatePack(
+                spec.bcp47,
+                OfflinePackStatus.ONLINE_ONLY,
+                0,
+                "Offline pack not offered on this phone — tap Transcribe (Device Speech) or Cloud AI"
+            )
+            return
+        }
+
+        val (useOnDevice, localeTag) = attempts[attemptIndex]
+        val recognizer = runCatching {
+            if (useOnDevice) {
+                SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext)
+            } else {
+                SpeechRecognizer.createSpeechRecognizer(appContext)
             }
+        }.getOrNull()
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                runCatching {
-                    recognizer.triggerModelDownload(
-                        intent,
-                        callbackExecutor,
-                        object : ModelDownloadListener {
-                            override fun onProgress(completedPercent: Int) {
-                                updatePack(
-                                    spec.bcp47,
-                                    OfflinePackStatus.DOWNLOADING,
-                                    completedPercent.coerceIn(1, 99)
-                                )
-                            }
+        if (recognizer == null) {
+            runDownloadAttempt(spec, attempts, attemptIndex + 1)
+            return
+        }
 
-                            override fun onSuccess() {
-                                updatePack(spec.bcp47, OfflinePackStatus.INSTALLED, 100)
-                                _statusMessage.value = "${spec.displayName} offline model installed!"
-                                mainHandler.post { runCatching { recognizer.destroy() } }
-                            }
+        // Per Android SpeechRecognizer docs, triggerModelDownload should pass EXTRA_LANGUAGE cleanly
+        // without conflicting flags like EXTRA_PREFER_OFFLINE.
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, localeTag)
+        }
 
-                            override fun onScheduled() {
-                                updatePack(spec.bcp47, OfflinePackStatus.DOWNLOADING, 15)
-                                _statusMessage.value =
-                                    "${spec.displayName} model scheduled in background by Android Speech Services."
-                                mainHandler.post { runCatching { recognizer.destroy() } }
-                            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            runCatching {
+                recognizer.triggerModelDownload(
+                    intent,
+                    callbackExecutor,
+                    object : ModelDownloadListener {
+                        override fun onProgress(completedPercent: Int) {
+                            updatePack(
+                                spec.bcp47,
+                                OfflinePackStatus.DOWNLOADING,
+                                completedPercent.coerceIn(1, 99),
+                                "Downloading… ${completedPercent.coerceIn(1, 99)}%"
+                            )
+                        }
 
-                            override fun onError(error: Int) {
-                                updatePack(spec.bcp47, OfflinePackStatus.AVAILABLE_TO_DOWNLOAD, 0)
-                                _statusMessage.value =
-                                    "Could not download ${spec.displayName} (code $error). Ensure Google Speech Services is enabled."
-                                mainHandler.post { runCatching { recognizer.destroy() } }
+                        override fun onSuccess() {
+                            _needsSpeechServicesSetup.value = false
+                            updatePack(spec.bcp47, OfflinePackStatus.INSTALLED, 100, "Installed • 100% Offline")
+                            _statusMessage.value = "${spec.displayName} offline model installed!"
+                            mainHandler.post { runCatching { recognizer.destroy() } }
+                        }
+
+                        override fun onScheduled() {
+                            updatePack(
+                                spec.bcp47,
+                                OfflinePackStatus.DOWNLOADING,
+                                20,
+                                "Scheduled by Google Speech Services (Wi-Fi)"
+                            )
+                            _statusMessage.value =
+                                "${spec.displayName} download scheduled in background by Google Speech Services."
+                            mainHandler.post { runCatching { recognizer.destroy() } }
+                        }
+
+                        override fun onError(error: Int) {
+                            mainHandler.post {
+                                runCatching { recognizer.destroy() }
+                                val hasMore = attemptIndex + 1 < attempts.size
+                                val retryableByTagOrBinder =
+                                    error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+                                        error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ||
+                                        error == SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT ||
+                                        error == SpeechRecognizer.ERROR_CLIENT ||
+                                        error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED
+                                if (hasMore && retryableByTagOrBinder) {
+                                    runDownloadAttempt(spec, attempts, attemptIndex + 1)
+                                } else {
+                                    val isUnsupportedOffline =
+                                        error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+                                            error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE
+                                    _needsSpeechServicesSetup.value =
+                                        error == SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT ||
+                                            error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED ||
+                                            error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS
+                                    val nextStatus = if (isUnsupportedOffline) {
+                                        OfflinePackStatus.ONLINE_ONLY
+                                    } else {
+                                        OfflinePackStatus.AVAILABLE_TO_DOWNLOAD
+                                    }
+                                    val humanMsg = describeSpeechError(spec.displayName, error)
+                                    updatePack(spec.bcp47, nextStatus, 0, humanMsg)
+                                    _statusMessage.value = humanMsg
+                                }
                             }
                         }
-                    )
-                }.onFailure {
-                    updatePack(spec.bcp47, OfflinePackStatus.AVAILABLE_TO_DOWNLOAD, 0)
+                    }
+                )
+            }.onFailure {
+                runCatching { recognizer.destroy() }
+                if (attemptIndex + 1 < attempts.size) {
+                    runDownloadAttempt(spec, attempts, attemptIndex + 1)
+                } else {
+                    updatePack(spec.bcp47, OfflinePackStatus.AVAILABLE_TO_DOWNLOAD, 0, it.localizedMessage)
                     _statusMessage.value = "Model download failed: ${it.localizedMessage}"
-                    runCatching { recognizer.destroy() }
                 }
-            } else {
-                // Android 13 (API 33): fire-and-forget triggerModelDownload
-                runCatching {
-                    recognizer.triggerModelDownload(intent)
-                    _statusMessage.value =
-                        "Requested ${spec.displayName} offline model download. Refresh status once complete."
-                }.onFailure {
-                    updatePack(spec.bcp47, OfflinePackStatus.AVAILABLE_TO_DOWNLOAD, 0)
-                    _statusMessage.value = "Could not request download: ${it.localizedMessage}"
-                }
-                mainHandler.postDelayed({
-                    runCatching { recognizer.destroy() }
-                    refreshInstalledModels()
-                }, 4_000L)
             }
+        } else {
+            // Android 13 (API 33): fire-and-forget triggerModelDownload
+            runCatching {
+                recognizer.triggerModelDownload(intent)
+                _statusMessage.value =
+                    "Requested ${spec.displayName} offline model download. Refresh status once complete."
+            }.onFailure {
+                updatePack(spec.bcp47, OfflinePackStatus.AVAILABLE_TO_DOWNLOAD, 0, it.localizedMessage)
+                _statusMessage.value = "Could not request download: ${it.localizedMessage}"
+            }
+            mainHandler.postDelayed({
+                runCatching { recognizer.destroy() }
+                refreshInstalledModels()
+            }, 4_000L)
         }
     }
 
     /**
-     * Transcribes a video or audio clip 100% offline using Android 13+'s on-device SpeechRecognizer
-     * fed via ParcelFileDescriptor audio pipe (`RecognizerIntent.EXTRA_AUDIO_SOURCE`).
+     * Transcribes a video or audio clip using Android 13+'s SpeechRecognizer fed via
+     * ParcelFileDescriptor audio pipe (`RecognizerIntent.EXTRA_AUDIO_SOURCE`).
+     * Uses 100% on-device offline recognition when the language pack is installed, and automatically
+     * falls back to system Google Speech Services when an offline pack isn't offered for that language
+     * (e.g. Telugu on OEM devices without an offline `te-IN` pack).
      */
     suspend fun transcribeClipOffline(
         uriString: String,
@@ -293,15 +463,29 @@ class OfflineSpeechModelManager private constructor(private val appContext: Cont
         languageHint: String,
         onStatus: (String) -> Unit
     ): Result<List<CaptionClip>> {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || !SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)) {
+        val hasOnDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)
+        val hasSystem = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            SpeechRecognizer.isRecognitionAvailable(appContext)
+
+        if (!hasOnDevice && !hasSystem) {
             return Result.failure(
                 IllegalStateException(
-                    "Direct offline video transcription requires Android 13+ with Speech Services. Use Offline Mic or connect a free AI key in AI Login."
+                    "Direct video speech transcription requires Android 13+ with Google Speech Services enabled. Use Offline Mic or Cloud AI."
                 )
             )
         }
 
-        val bcp47 = OfflineLanguageCatalog.bcp47ForName(languageHint)
+        val packState = _packs.value.firstOrNull {
+            it.spec.displayName.equals(languageHint, ignoreCase = true) ||
+                it.spec.bcp47.equals(languageHint, ignoreCase = true)
+        }
+        val bcp47 = packState?.deviceLocaleTag?.takeIf { it.isNotBlank() }
+            ?: OfflineLanguageCatalog.bcp47ForName(languageHint)
+
+        // Prefer 100% on-device offline recognizer when installed/available, else system Google Speech
+        var useStrictOffline = hasOnDevice && packState?.status != OfflinePackStatus.ONLINE_ONLY
+
         onStatus("Decoding clip audio to 16kHz PCM…")
         val segmentsRes = AudioClipExtractor.decodeToMono16kPcmSegments(
             context = appContext,
@@ -316,12 +500,42 @@ class OfflineSpeechModelManager private constructor(private val appContext: Cont
 
         val rawCaptions = mutableListOf<RawCaptionSegment>()
         val total = pcmSegments.size
+        var lastErrorCode: Int? = null
+
         for (idx in pcmSegments.indices) {
             val seg = pcmSegments[idx]
-            onStatus("Offline AI (${languageHint}) • segment ${idx + 1}/$total…")
-            val recognized = recognizeSinglePcmSegmentOffline(seg.pcm16kMonoBytes, bcp47)
-            if (!recognized.isNullOrBlank()) {
-                rawCaptions.add(RawCaptionSegment(seg.startMs, seg.endMs, recognized))
+            val modeLabel = if (useStrictOffline) "Offline AI" else "Device Speech"
+            onStatus("$modeLabel ($languageHint) • segment ${idx + 1}/$total…")
+
+            var attempt = recognizeSinglePcmSegment(
+                pcm16kMono = seg.pcm16kMonoBytes,
+                bcp47Language = bcp47,
+                preferOffline = useStrictOffline
+            )
+
+            // If on-device offline pack isn't installed/supported on this phone (e.g., Telugu code 12/13),
+            // switch seamlessly to system Google Speech Services for this and remaining segments!
+            val shouldFallbackOnline = useStrictOffline &&
+                hasSystem &&
+                attempt.text.isNullOrBlank() &&
+                (attempt.errorCode == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+                    attempt.errorCode == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ||
+                    attempt.errorCode == SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT ||
+                    attempt.errorCode == SpeechRecognizer.ERROR_SERVER_DISCONNECTED)
+
+            if (shouldFallbackOnline) {
+                useStrictOffline = false
+                onStatus("No offline $languageHint pack on phone — switching to Google Speech…")
+                attempt = recognizeSinglePcmSegment(
+                    pcm16kMono = seg.pcm16kMonoBytes,
+                    bcp47Language = bcp47,
+                    preferOffline = false
+                )
+            }
+
+            if (attempt.errorCode != null) lastErrorCode = attempt.errorCode
+            if (!attempt.text.isNullOrBlank()) {
+                rawCaptions.add(RawCaptionSegment(seg.startMs, seg.endMs, attempt.text))
             }
         }
 
@@ -333,30 +547,33 @@ class OfflineSpeechModelManager private constructor(private val appContext: Cont
             maxWordsPerLine = 5
         )
         return if (normalized.isEmpty()) {
-            Result.failure(
-                IllegalStateException(
-                    "Offline engine detected no clear speech in $languageHint. Make sure the $languageHint offline pack is downloaded in Offline Models, or try AI Login."
-                )
-            )
+            val reason = lastErrorCode?.let { describeSpeechError(languageHint, it) }
+                ?: "No clear $languageHint speech detected. Try Cloud AI (Gemini) in AI Login for best Telugu accuracy."
+            Result.failure(IllegalStateException(reason))
         } else {
             Result.success(normalized)
         }
     }
 
-    private suspend fun recognizeSinglePcmSegmentOffline(
+    private data class SegmentRecognitionOutcome(
+        val text: String? = null,
+        val errorCode: Int? = null
+    )
+
+    private suspend fun recognizeSinglePcmSegment(
         pcm16kMono: ByteArray,
-        bcp47Language: String
-    ): String? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
-        val pipe = runCatching { ParcelFileDescriptor.createPipe() }.getOrNull() ?: return null
+        bcp47Language: String,
+        preferOffline: Boolean
+    ): SegmentRecognitionOutcome {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return SegmentRecognitionOutcome()
+        val pipe = runCatching { ParcelFileDescriptor.createPipe() }.getOrNull()
+            ?: return SegmentRecognitionOutcome()
         val readFd = pipe[0]
         val writeFd = pipe[1]
 
-        // Stream PCM bytes asynchronously into the write end of the pipe, then close to signal EOF
         val writerThread = Thread {
             try {
                 ParcelFileDescriptor.AutoCloseOutputStream(writeFd).use { out ->
-                    // Pace slightly in chunks so recognizer buffer does not overflow
                     val chunkSize = 3200 // 100ms of 16kHz mono 16-bit PCM
                     var offset = 0
                     while (offset < pcm16kMono.size) {
@@ -372,18 +589,22 @@ class OfflineSpeechModelManager private constructor(private val appContext: Cont
             }
         }.apply { start() }
 
-        val text = withTimeoutOrNull(18_000L) {
-            suspendCancellableCoroutine<String?> { cont ->
+        val outcome = withTimeoutOrNull(18_000L) {
+            suspendCancellableCoroutine<SegmentRecognitionOutcome> { cont ->
                 mainHandler.post {
                     var recognizer: SpeechRecognizer? = null
-                    fun finish(value: String?) {
+                    fun finish(result: SegmentRecognitionOutcome) {
                         runCatching { recognizer?.destroy() }
                         runCatching { readFd.close() }
-                        if (cont.isActive) cont.resume(value)
+                        if (cont.isActive) cont.resume(result)
                     }
 
                     try {
-                        recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext)
+                        recognizer = if (preferOffline && SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)) {
+                            SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext)
+                        } else {
+                            SpeechRecognizer.createSpeechRecognizer(appContext)
+                        }
                         var latestPartial: String? = null
                         recognizer.setRecognitionListener(object : RecognitionListener {
                             override fun onReadyForSpeech(params: Bundle?) = Unit
@@ -397,20 +618,27 @@ class OfflineSpeechModelManager private constructor(private val appContext: Cont
                                 val p = list?.firstOrNull()?.trim()
                                 if (!p.isNullOrEmpty()) latestPartial = p
                             }
+
                             override fun onResults(results: Bundle?) {
                                 val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                                 val best = list?.firstOrNull()?.trim().orEmpty().ifBlank { latestPartial.orEmpty() }
-                                finish(best.ifBlank { null })
+                                finish(SegmentRecognitionOutcome(text = best.ifBlank { null }))
                             }
+
                             override fun onError(error: Int) {
-                                finish(latestPartial?.takeIf { it.isNotBlank() })
+                                finish(
+                                    SegmentRecognitionOutcome(
+                                        text = latestPartial?.takeIf { it.isNotBlank() },
+                                        errorCode = error
+                                    )
+                                )
                             }
                         })
 
                         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                             putExtra(RecognizerIntent.EXTRA_LANGUAGE, bcp47Language)
-                            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, preferOffline)
                             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                             putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, readFd)
                             putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
@@ -426,25 +654,34 @@ class OfflineSpeechModelManager private constructor(private val appContext: Cont
                             }
                         }
                     } catch (_: Exception) {
-                        finish(null)
+                        finish(SegmentRecognitionOutcome(errorCode = SpeechRecognizer.ERROR_CLIENT))
                     }
                 }
             }
-        }
+        } ?: SegmentRecognitionOutcome()
 
         withContext(Dispatchers.IO) {
             runCatching { writerThread.interrupt() }
             runCatching { readFd.close() }
             runCatching { writeFd.close() }
         }
-        return text
+        return outcome
     }
 
-    private fun updatePack(bcp47: String, status: OfflinePackStatus, progress: Int) {
+    private fun updatePack(
+        bcp47: String,
+        status: OfflinePackStatus,
+        progress: Int,
+        note: String? = null
+    ) {
         _packs.update { list ->
             list.map { pack ->
                 if (pack.spec.bcp47.equals(bcp47, ignoreCase = true)) {
-                    pack.copy(status = status, downloadProgress = progress)
+                    pack.copy(
+                        status = status,
+                        downloadProgress = progress,
+                        note = note ?: pack.note
+                    )
                 } else pack
             }
         }
@@ -465,5 +702,31 @@ class OfflineSpeechModelManager private constructor(private val appContext: Cont
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: OfflineSpeechModelManager(context.applicationContext).also { INSTANCE = it }
             }
+
+        /**
+         * Decodes Android [SpeechRecognizer] error codes into clear, actionable guidance.
+         */
+        fun describeSpeechError(languageLabel: String, errorCode: Int): String = when (errorCode) {
+            SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ->
+                "Google Speech Services doesn't offer a downloadable offline $languageLabel pack on this device (code 12). Tap Transcribe to use Device Speech or switch to Cloud Gemini AI."
+            SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
+                "Offline $languageLabel pack is unavailable right now (code 13). Tap 'Speech Settings' or use Transcribe / Cloud AI."
+            SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT ->
+                "Google Speech Services is disabled or outdated on this phone (code 14). Tap 'Enable Google Speech' below."
+            SpeechRecognizer.ERROR_SERVER_DISCONNECTED ->
+                "Google Speech Services disconnected (code 11). Tap 'Enable Google Speech' or retry."
+            SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
+                "Connect to Wi-Fi or mobile data once to download the $languageLabel model (code $errorCode)."
+            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
+                "Speech Services needs Microphone permission (code 9). Grant mic permission and retry."
+            SpeechRecognizer.ERROR_TOO_MANY_REQUESTS ->
+                "Download queue is busy (code 15). Wait a moment and tap Download again."
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY ->
+                "Speech engine is busy (code 8). Wait a second and retry."
+            SpeechRecognizer.ERROR_NO_MATCH ->
+                "No clear $languageLabel speech detected (code 7)."
+            else ->
+                "Could not download $languageLabel pack (code $errorCode). Check Google Speech Services or tap Transcribe / Cloud AI."
+        }
     }
 }
